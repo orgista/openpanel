@@ -24,7 +24,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21 # Capacitor 8's Android library targets Java 21
       - uses: android-actions/setup-android@v3
 
       - run: npm ci
