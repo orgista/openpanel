@@ -59,4 +59,4 @@ unmanaged devices, use the standalone kiosk flow. See
 
 ## License
 
-To be determined — see repository settings.
+MIT — see [LICENSE](LICENSE). © 2026 Orgista.
