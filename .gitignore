@@ -1,0 +1,54 @@
+# --- Signing material: NEVER commit keystores or signing secrets ---
+# Release signing material must live in a secret manager / offline signer, not
+# in source control. Debug keystores are throwaway but are also ignored here.
+*.keystore
+*.jks
+*.p12
+build-tools/*.keystore
+keystore.properties
+signing.properties
+*.env
+.env
+.env.*
+
+# --- Build outputs / artifacts ---
+dist/
+build/
+*.apk
+*.aab
+
+# --- Third-party / reference binaries: do NOT redistribute publicly ---
+# Samples/ holds commercial Fully Kiosk APKs kept only for local reference.
+Samples/
+*.zip
+
+# --- Dependencies / toolchains ---
+node_modules/
+.gradle-home/
+.toolchains/
+
+# --- Private UI (open-core: the React app lives in a separate PRIVATE repo;
+#     see docs/open-source-split.md). Only the engine/native code is public. ---
+/src/
+/default_shadcn_theme.css
+
+# --- Machine-specific / generated ---
+local.properties
+.gradle/
+
+# --- Retired internal notes / research (kept locally, not published) ---
+docs/_archive/
+
+# --- Screenshots & Figma scaffolding (UI/reference assets, not engine code) ---
+/*.png
+/*.jpg
+/*.jpeg
+/guidelines/
+
+# --- macOS Finder duplicate artifacts ---
+*\ 2
+*\ 2.*
+
+# --- OS / editor cruft ---
+.DS_Store
+._*

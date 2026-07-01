@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">OpenPanel</string>
+    <string name="title_activity_main">OpenPanel</string>
+    <string name="package_name">com.orgista.openpanel</string>
+    <string name="custom_url_scheme">com.orgista.openpanel</string>
+    <string name="device_admin_label">OpenPanel Kiosk</string>
+    <string name="device_admin_description">Lets OpenPanel lock this device into kiosk mode when you are not using ArborXR.</string>
+</resources>
