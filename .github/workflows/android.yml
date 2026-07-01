@@ -1,99 +1,22 @@
-name: Android build
+name: Engine CI
 
-# Builds the Capacitor OpenPanel APK in CI (ubuntu runner = real filesystem, so
-# none of the SMB file-lock problems that block Gradle on the local share).
-#
-# The React UI lives in a PRIVATE submodule (see docs/open-source-split.md).
-# Checking it out needs a PAT with read access to that repo, stored as the
-# UI_SUBMODULE_TOKEN secret. Pull requests from forks don't get secrets, so the
-# full APK build only runs on pushes / internal PRs; fork PRs run the
-# native-only compile check below.
+# This is the OPEN-CORE engine repo — it has no UI (the React app lives in a
+# separate private repo). So CI only verifies that the native engine compiles.
+# The full APK / signed-release build needs the private UI + signing secrets and
+# lives wherever the UI submodule is available (see docs/open-source-split.md).
 
 on:
   push:
     branches: [main]
-    tags: ['v*'] # tag push -> signed release build
   pull_request:
   workflow_dispatch:
 
 jobs:
-  build-apk:
-    name: Build debug APK
-    runs-on: ubuntu-latest
-    # Only when submodule access is available (push or non-fork PR).
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          # PAT that can read the private UI submodule repo.
-          token: ${{ secrets.UI_SUBMODULE_TOKEN }}
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - uses: android-actions/setup-android@v3
-
-      - name: Install web dependencies
-        run: npm ci
-
-      - name: Build web bundle
-        run: npm run build
-
-      - name: Sync Capacitor Android
-        run: npx cap sync android
-
-      - name: Assemble debug APK
-        working-directory: android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: openpanel-debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-
-  # Open-core safety net: anyone (incl. fork PRs without UI submodule access) can
-  # still verify the public native engine (SystemBridgePlugin, device-admin,
-  # MainActivity) compiles. Java compilation doesn't need the React UI / web
-  # bundle, so no submodule or `cap sync` is required here.
-  native-compile:
-    name: Native engine compiles (no UI)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4 # no submodules — public engine only
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - uses: android-actions/setup-android@v3
-      - run: npm ci # provides the Capacitor Android Gradle module
-      - name: Compile native Java
-        working-directory: android
-        run: ./gradlew :app:compileDebugJavaWithJavac --no-daemon --stacktrace
-
-  release:
-    name: Signed release APK
-    # Only on a version tag (e.g. v0.2.4); needs the signing secrets.
-    if: startsWith(github.ref, 'refs/tags/v')
+  engine:
+    name: Native engine compiles
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          token: ${{ secrets.UI_SUBMODULE_TOKEN }}
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -105,33 +28,12 @@ jobs:
       - uses: android-actions/setup-android@v3
 
       - run: npm ci
-      - run: npm run build
-      - run: npx cap sync android
 
-      - name: Assemble release (unsigned)
+      # capacitor-cordova-android-plugins is generated, not committed — regenerate
+      # the native module graph. No web build/UI is needed to compile the engine.
+      - name: Prepare Capacitor native modules
+        run: npx cap update android
+
+      - name: Compile native engine (Java)
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
-
-      - name: Sign release APK
-        env:
-          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          KS_PASS: ${{ secrets.OPENPANEL_KEYSTORE_PASS }}
-          KEY_ALIAS: ${{ secrets.OPENPANEL_KEY_ALIAS }}
-          KEY_PASS: ${{ secrets.OPENPANEL_KEY_PASS }}
-        run: |
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
-          UNSIGNED="$(ls android/app/build/outputs/apk/release/*-unsigned.apk | head -1)"
-          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/openpanel-aligned.apk"
-          "$BT/apksigner" sign \
-            --ks "$RUNNER_TEMP/release.keystore" --ks-key-alias "$KEY_ALIAS" \
-            --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
-            --out openpanel-release.apk "$RUNNER_TEMP/openpanel-aligned.apk"
-          "$BT/apksigner" verify --print-certs openpanel-release.apk
-          rm -f "$RUNNER_TEMP/release.keystore"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: openpanel-release-apk
-          path: openpanel-release.apk
-          if-no-files-found: error
+        run: ./gradlew :app:compileDebugJavaWithJavac --no-daemon --stacktrace
