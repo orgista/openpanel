@@ -23,7 +23,9 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void hideSystemBars() {
-        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        // Decor keeps fitting system windows (the default): opting out of it
+        // disables adjustResize, so the WebView would no longer shrink when the
+        // soft keyboard opens and fixed-position UI would hide behind the IME.
         WindowInsetsControllerCompat controller =
             WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
         controller.hide(WindowInsetsCompat.Type.systemBars());
