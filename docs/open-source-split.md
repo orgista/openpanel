@@ -53,10 +53,12 @@ Fully Kiosk APKs — do not redistribute), `*.apk` / `*.zip`, `dist/`, `build/`,
 Verify before any push: `git ls-files | grep -iE 'keystore|\.env|password|secret'`
 must be empty.
 
-## Release signing (CI)
+## Release signing
 
-`.github/workflows/android.yml` builds a debug APK on every push and a **signed
-release APK on a `v*` tag**. Release signing reads these repo secrets:
+The checked-in `.github/workflows/android.yml` is an engine compile check for the
+public repo. A signed release requires a UI-aware checkout plus external signing
+inputs. The release Gradle tasks fail unless these values are supplied from CI
+or a secret manager:
 
 ```sh
 PASS="$(security find-generic-password -a openpanel-upload -s "OpenPanel upload keystore password" -w)"
@@ -66,4 +68,7 @@ printf '%s' "$PASS"       | gh secret set OPENPANEL_KEYSTORE_PASS --repo "$REPO"
 printf '%s' "$PASS"       | gh secret set OPENPANEL_KEY_PASS      --repo "$REPO"
 printf 'openpanel-upload' | gh secret set OPENPANEL_KEY_ALIAS     --repo "$REPO"
 ```
-Cut a release with `git tag v0.2.4 && git push --tags`.
+
+In CI, `RELEASE_KEYSTORE_BASE64` should be decoded into a temporary file and
+`OPENPANEL_KEYSTORE_FILE` should be exported to that temporary path at runtime.
+Do not commit the keystore or write signing passwords into Gradle files.

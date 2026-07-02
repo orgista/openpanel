@@ -1,5 +1,23 @@
 apply plugin: 'com.android.application'
 
+def openPanelSigningValue = { String name ->
+    def value = project.findProperty(name)
+    if (value != null && value.toString().trim()) {
+        return value.toString()
+    }
+    value = System.getenv(name)
+    return value != null && value.trim() ? value : null
+}
+
+def openPanelReleaseStoreFile = openPanelSigningValue("OPENPANEL_KEYSTORE_FILE") ?: openPanelSigningValue("OPENPANEL_STORE_FILE")
+def openPanelReleaseStorePassword = openPanelSigningValue("OPENPANEL_KEYSTORE_PASS")
+def openPanelReleaseKeyAlias = openPanelSigningValue("OPENPANEL_KEY_ALIAS")
+def openPanelReleaseKeyPassword = openPanelSigningValue("OPENPANEL_KEY_PASS")
+def openPanelReleaseSigningReady = openPanelReleaseStoreFile &&
+        openPanelReleaseStorePassword &&
+        openPanelReleaseKeyAlias &&
+        openPanelReleaseKeyPassword
+
 android {
     namespace = "com.orgista.openpanel"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -16,10 +34,23 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (openPanelReleaseSigningReady) {
+                storeFile file(openPanelReleaseStoreFile)
+                storePassword openPanelReleaseStorePassword
+                keyAlias openPanelReleaseKeyAlias
+                keyPassword openPanelReleaseKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (openPanelReleaseSigningReady) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
@@ -51,4 +82,28 @@ try {
     }
 } catch(Exception e) {
     logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}
+
+tasks.register("verifyOpenPanelReleaseSigning") {
+    group = "verification"
+    description = "Fails release builds unless OpenPanel release signing inputs are present and the keystore file exists."
+    doLast {
+        def missing = []
+        if (!openPanelReleaseStoreFile) missing << "OPENPANEL_KEYSTORE_FILE"
+        if (!openPanelReleaseStorePassword) missing << "OPENPANEL_KEYSTORE_PASS"
+        if (!openPanelReleaseKeyAlias) missing << "OPENPANEL_KEY_ALIAS"
+        if (!openPanelReleaseKeyPassword) missing << "OPENPANEL_KEY_PASS"
+        if (!missing.isEmpty()) {
+            throw new GradleException("Missing OpenPanel release signing inputs: ${missing.join(', ')}. Keep values in CI/secret manager; do not commit them.")
+        }
+        if (!file(openPanelReleaseStoreFile).isFile()) {
+            throw new GradleException("OpenPanel release keystore file was not found at OPENPANEL_KEYSTORE_FILE.")
+        }
+    }
+}
+
+tasks.matching { task ->
+    task.name in ["preReleaseBuild", "assembleRelease", "bundleRelease", "packageRelease"]
+}.configureEach {
+    dependsOn tasks.named("verifyOpenPanelReleaseSigning")
 }

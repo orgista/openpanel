@@ -36,11 +36,24 @@ The full APK build needs the private UI present at `src/`. With it in place:
 npm ci
 npm run build            # vite: src/ -> dist/
 npx cap sync android     # copy the web bundle + plugins into the native project
-cd android && ./gradlew assembleDebug     # debug-signed; release signing in CI
+cd android && ./gradlew assembleDebug     # debug-signed; local/dev only
 ```
 
-CI (`.github/workflows/android.yml`) builds a debug APK on every push and a
-signed **release** APK on a `v*` tag.
+Android native compilation requires JDK 21. Java 17 fails Capacitor's source
+level 21, and newer JDKs can fail Android's `jlink` transform. Set `JAVA_HOME`
+to a real JDK 21 install before running Gradle locally.
+
+The checked-in CI (`.github/workflows/android.yml`) verifies that the public
+native engine compiles. A full ArborXR release build needs a UI-aware checkout
+and external signing inputs; `android/app/build.gradle` now refuses release
+tasks unless `OPENPANEL_KEYSTORE_FILE`, `OPENPANEL_KEYSTORE_PASS`,
+`OPENPANEL_KEY_ALIAS`, and `OPENPANEL_KEY_PASS` are provided from CI or a secret
+manager.
+
+The signing preflight is wired into `preReleaseBuild`, `assembleRelease`,
+`bundleRelease`, and `packageRelease`. A release build with missing signing
+inputs fails before Java compilation instead of falling through to unsigned APK
+output or a later toolchain error.
 
 ## Deploy
 

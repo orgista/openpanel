@@ -9,32 +9,56 @@ OpenPanel ships as a single Capacitor Android app:
 
 ## Building
 
-The APK is built by **GitHub Actions** (`.github/workflows/android.yml`) — the repo
-lives on an SMB share that can't run Gradle locally. To build on a local-disk
-checkout:
+The checked-in GitHub Actions workflow only verifies that the public native
+engine compiles. A full ArborXR APK build needs a UI-aware checkout because the
+private React UI lives at `src/`. The repo lives on an SMB share that can break
+Gradle locking/cleanup, so use a local-disk checkout or CI runner for release
+builds:
 
 ```sh
 npm ci
 npm run build            # vite: src/ -> dist/
 npx cap sync android     # copy the web bundle + plugins into the native project
-cd android && ./gradlew assembleDebug      # debug-signed; for release see below
+cd android && ./gradlew assembleDebug      # debug-signed; for dev only
 ```
 
 Debug builds are signed with the standard Android debug key — fine for dev,
 never trusted for production updates.
 
+Use JDK 21 for the Android build. Java 17 fails Capacitor's source level 21, and
+newer JDKs can fail Android's `jlink` transform. On macOS, Android Studio's
+bundled JBR is a convenient JDK 21:
+`/Applications/Android Studio.app/Contents/jbr/Contents/Home`.
+
 ## Signing (release)
 
-Release signing material is **not** stored in this repo. CI signs the release APK
-with the upload key supplied via repo secrets — `RELEASE_KEYSTORE_BASE64`,
-`OPENPANEL_KEYSTORE_PASS`, `OPENPANEL_KEY_PASS`, `OPENPANEL_KEY_ALIAS` (see
-`docs/open-source-split.md` for the `gh secret set` commands). To sign locally,
-run `./gradlew assembleRelease`, then sign the unsigned APK with `apksigner` using
-your keystore kept **outside** the repo (e.g. `~/openpanel-upload.keystore`).
+Release signing material is **not** stored in this repo. Release Gradle tasks
+now require external signing inputs and fail if they are absent. The preflight is
+wired into `preReleaseBuild`, `assembleRelease`, `bundleRelease`, and
+`packageRelease`, so missing signing inputs stop the release path before Java
+compilation or unsigned APK output.
+
+- `OPENPANEL_KEYSTORE_FILE`
+- `OPENPANEL_KEYSTORE_PASS`
+- `OPENPANEL_KEY_ALIAS`
+- `OPENPANEL_KEY_PASS`
+
+For CI, store the keystore as `RELEASE_KEYSTORE_BASE64`, decode it into a runner
+temp file, and export `OPENPANEL_KEYSTORE_FILE` to that path before running
+`./gradlew assembleRelease`. For local signing, keep the keystore **outside** the
+repo, for example `~/openpanel-upload.keystore`, and pass these values through
+your shell or secret manager.
 
 Keep the upload key stable and managed in a secret manager / offline signer:
 Android rejects updates signed by a different key. Keystores are git-ignored
 (`*.keystore`); never commit one.
+
+Before upload, verify the produced APK:
+
+```sh
+apksigner verify --print-certs android/app/build/outputs/apk/release/app-release.apk
+aapt dump badging android/app/build/outputs/apk/release/app-release.apk | grep -E "package:|sdkVersion|targetSdkVersion"
+```
 
 ## Uploading to ArborXR
 
