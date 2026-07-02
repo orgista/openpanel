@@ -11,32 +11,30 @@ removed).
 | Path | Repo | Notes |
 | --- | --- | --- |
 | `android/` (Capacitor native, `SystemBridgePlugin`, `OpenPanelDeviceAdminReceiver`, manifest, gradle) | **public** `orgista/openpanel` | The kiosk engine + native bridge |
-| `scripts/`, `docs/`, `guidelines/`, build config (`package.json`, `vite.config.ts`, `capacitor.config.ts`, `tsconfig.json`, `index.html`, `postcss.config.mjs`) | **public** `orgista/openpanel` | The UI builds against these |
+| `scripts/`, `docs/`, build config (`package.json`, `vite.config.ts`, `capacitor.config.ts`, `tsconfig.json`, `index.html`, `postcss.config.mjs`) | **public** `orgista/openpanel` | The UI builds against these |
 | `.github/workflows/` | **public** `orgista/openpanel` | CI |
-| `src/` (entire React app + TS bridge bindings, styles, assets) | **private** (separate repo) | The gated UI — **git-ignored here**, not in the public repo |
+| `src/` (entire React app + TS bridge bindings, styles, assets) | **private** `orgista/openpanel-ui` | The gated UI — **git-ignored here**, not in the public repo |
 
-The UI currently lives only in the local working tree and is excluded via
-`.gitignore` (`/src/`). To build the full app, place the private UI at `src/`
-(that keeps `vite`, `index.html` → `/src/main.tsx`, and `tsconfig` working
-unchanged). It can later be wired as a git submodule at `src/` — see below.
+The UI lives in the private repo **`orgista/openpanel-ui`** (its root maps 1:1
+onto `src/`) and is excluded here via `.gitignore` (`/src/`). To build the full
+app, clone it to `src/` (that keeps `vite`, `index.html` → `/src/main.tsx`, and
+`tsconfig` working unchanged). It can also be wired as a git submodule at
+`src/` — see below.
 
-## Adding the private UI repo (optional, later)
+## Wiring the private UI as a submodule (optional)
 
-The public engine repo already exists and is pushed. To formalize the private UI
-as a submodule:
+The private UI repo already exists and is pushed (in the local working tree,
+`src/` is a nested git repo tracking it — push UI changes from there). To
+formalize it as a submodule of the public repo:
 
 ```sh
-# 1. Private UI repo from the current src/
-cd src && git init && git add . && git commit -m "OpenPanel UI"
-gh repo create orgista/openpanel-ui --private --source=. --push && cd ..
-
-# 2. Wire it into the public repo as a submodule at src/
+# 1. Wire it in as a submodule at src/
 #    (first remove the /src/ ignore line from .gitignore)
 git submodule add git@github.com:orgista/openpanel-ui.git src
-git commit -am "Add private UI submodule at src/"
+git commit -am "build: add private UI submodule at src/"
 git push
 
-# 3. Let CI read the private submodule
+# 2. Let CI read the private submodule
 gh secret set UI_SUBMODULE_TOKEN --repo orgista/openpanel   # PAT w/ read on openpanel-ui
 ```
 
@@ -47,8 +45,8 @@ A contributor without UI access gets a buildable open engine but no bundled UI.
 
 `/src/` (private UI), keystores (`*.keystore`), `.env*`, `Samples/` (commercial
 Fully Kiosk APKs — do not redistribute), `*.apk` / `*.zip`, `dist/`, `build/`,
-`node_modules/`, `.toolchains/`, `local.properties`, and `docs/_archive/`
-(retired internal/research notes).
+`node_modules/`, `.toolchains/`, `local.properties`, `guidelines/` (design
+template), and `docs/_archive/` (retired internal/research notes).
 
 Verify before any push: `git ls-files | grep -iE 'keystore|\.env|password|secret'`
 must be empty.
