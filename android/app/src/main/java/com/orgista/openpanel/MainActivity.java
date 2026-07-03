@@ -1,5 +1,7 @@
 package com.orgista.openpanel;
 
+import android.app.ActivityManager;
+import android.content.Context;
 import android.os.Bundle;
 
 import androidx.core.view.WindowCompat;
@@ -19,7 +21,26 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) hideSystemBars();
+        if (hasFocus) {
+            hideSystemBars();
+            pinKioskIfUnlocked();
+        }
+    }
+
+    // Screen pinning needs no Device Owner, so this closes the gesture-nav
+    // "swipe up and hold" app dock and the Overview/Recents screen on every
+    // device, companion or standalone. Re-engages whenever this activity
+    // regains window focus (e.g. backing out of a launched app);
+    // SystemBridgePlugin unpins first whenever it deliberately starts another
+    // activity (launching an app, opening a settings screen).
+    private void pinKioskIfUnlocked() {
+        ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        if (am == null || am.getLockTaskModeState() != ActivityManager.LOCK_TASK_MODE_NONE) return;
+        try {
+            startLockTask();
+        } catch (Exception ignored) {
+            // Retried on the next focus-gain if the platform briefly refused it.
+        }
     }
 
     private void hideSystemBars() {

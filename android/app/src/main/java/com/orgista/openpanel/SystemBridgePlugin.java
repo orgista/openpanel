@@ -174,6 +174,7 @@ public class SystemBridgePlugin extends Plugin {
             return;
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        unpinIfPinned();
         getContext().startActivity(intent);
         call.resolve();
     }
@@ -352,6 +353,7 @@ public class SystemBridgePlugin extends Plugin {
         } else {
             intent = new Intent(Settings.ACTION_WIFI_SETTINGS);
         }
+        unpinIfPinned();
         getActivity().startActivity(intent);
         call.resolve();
     }
@@ -634,6 +636,7 @@ public class SystemBridgePlugin extends Plugin {
         String action = enabled
             ? BluetoothAdapter.ACTION_REQUEST_ENABLE
             : "android.bluetooth.adapter.action.REQUEST_DISABLE";
+        unpinIfPinned();
         try {
             getActivity().startActivity(new Intent(action));
             call.resolve();
@@ -649,6 +652,7 @@ public class SystemBridgePlugin extends Plugin {
     public void openBluetoothSettings(PluginCall call) {
         Intent intent = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        unpinIfPinned();
         getActivity().startActivity(intent);
         call.resolve();
     }
@@ -676,6 +680,20 @@ public class SystemBridgePlugin extends Plugin {
         if (state == ActivityManager.LOCK_TASK_MODE_LOCKED) return "locked";
         if (state == ActivityManager.LOCK_TASK_MODE_PINNED) return "pinned";
         return "none";
+    }
+
+    // MainActivity auto-pins (plain screen pinning, no Device Owner needed)
+    // whenever it's the foreground screen, to block the gesture-nav app dock
+    // and Overview/Recents. Plain pinning (unlike the DPM-allowlisted "locked"
+    // mode from enableKioskLock) blocks switching to any other task, so any
+    // method here that deliberately leaves OpenPanel's task must unpin first;
+    // MainActivity re-pins on its own the next time it regains focus. Locked
+    // mode is left alone — Android already permits switching among the
+    // Device-Owner-allowlisted packages without unpinning.
+    private void unpinIfPinned() {
+        if (lockTaskState() == ActivityManager.LOCK_TASK_MODE_PINNED) {
+            try { getActivity().stopLockTask(); } catch (Exception ignored) {}
+        }
     }
 
     @PluginMethod
@@ -714,6 +732,7 @@ public class SystemBridgePlugin extends Plugin {
         intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
                 "Enable so OpenPanel can lock this device into kiosk mode.");
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        unpinIfPinned();
         getActivity().startActivity(intent);
         call.resolve();
     }
@@ -722,6 +741,7 @@ public class SystemBridgePlugin extends Plugin {
     public void openLauncherSettings(PluginCall call) {
         Intent intent = new Intent(Settings.ACTION_HOME_SETTINGS);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        unpinIfPinned();
         try {
             getActivity().startActivity(intent);
         } catch (Exception e) {
