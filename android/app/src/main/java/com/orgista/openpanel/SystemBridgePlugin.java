@@ -1,7 +1,9 @@
 package com.orgista.openpanel;
 
 import android.Manifest;
+import android.app.Activity;
 import android.app.ActivityManager;
+import android.app.UiModeManager;
 import android.app.admin.DevicePolicyManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -15,21 +17,32 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.InstallSourceInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.Uri;
 import android.net.NetworkCapabilities;
 import android.net.wifi.ScanResult;
+import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.net.wifi.WifiNetworkSuggestion;
 import android.os.BatteryManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
+import android.speech.RecognizerIntent;
+import android.text.Html;
 import android.util.Base64;
+import android.util.Log;
+import android.view.InputDevice;
+import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -38,15 +51,37 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 
+import androidx.annotation.RequiresApi;
+import androidx.activity.result.ActivityResult;
+import androidx.core.content.ContextCompat;
+
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.lang.reflect.Method;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @CapacitorPlugin(
     name = "SystemBridge",
@@ -63,10 +98,605 @@ public class SystemBridgePlugin extends Plugin {
 
     // ArborXR's MDM client is the Device Owner on managed devices.
     private static final String ARBORXR_DPC = "app.xrdm.client";
+    private static final String LOG_TAG = "OpenPanel";
 
     private BroadcastReceiver btScanReceiver;
     private BroadcastReceiver btStateReceiver;
+    private BroadcastReceiver bondReceiver;
+    private BroadcastReceiver batteryReceiver;
     private final List<JSObject> btScanResults = new ArrayList<>();
+    // Guards the in-flight scan call + its watchdog so a scan settles exactly
+    // once, even if the timeout, DISCOVERY_FINISHED, and adapter-off events race.
+    private final Object btScanLock = new Object();
+    private PluginCall btScanCall;
+    private Runnable btScanTimeout;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private static final long BT_SCAN_TIMEOUT_MS = 20_000;
+    private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
+    // Access-ordered so the least-recently-used continuation cursor is evicted
+    // when the map is full, instead of clearing every cursor (which would break
+    // an open channel browser mid-scroll).
+    private final Map<String, YouTubeCatalogCursor> youtubeCatalogCursors =
+        new LinkedHashMap<>(16, 0.75f, true);
+
+    @PluginMethod
+    public void writeDiagnostic(PluginCall call) {
+        String level = call.getString("level", "info");
+        String message = call.getString("message", "OpenPanel diagnostic");
+        if (message.length() > 2_000) message = message.substring(0, 2_000);
+        if ("error".equals(level)) {
+            Log.e(LOG_TAG, message);
+        } else if ("warning".equals(level)) {
+            Log.w(LOG_TAG, message);
+        } else {
+            Log.i(LOG_TAG, message);
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void hideKeyboard(PluginCall call) {
+        getActivity().runOnUiThread(() -> {
+            View focused = getActivity().getCurrentFocus();
+            View target = focused != null ? focused : getBridge().getWebView();
+            InputMethodManager keyboard = (InputMethodManager) getContext()
+                .getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (focused != null) focused.clearFocus();
+            if (keyboard != null && target != null && target.getWindowToken() != null) {
+                keyboard.hideSoftInputFromWindow(target.getWindowToken(), 0);
+            }
+            call.resolve();
+        });
+    }
+
+    @PluginMethod
+    public void setKeepScreenOn(PluginCall call) {
+        boolean enabled = call.getBoolean("enabled", false);
+        getActivity().runOnUiThread(() -> {
+            if (enabled) {
+                getActivity().getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            } else {
+                getActivity().getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+            call.resolve();
+        });
+    }
+
+    // ---------- Google TV input + API-key-free YouTube channel verification ----------
+
+    @PluginMethod
+    public void getDeviceProfile(PluginCall call) {
+        PackageManager pm = getContext().getPackageManager();
+        Configuration configuration = getContext().getResources().getConfiguration();
+        UiModeManager uiModeManager = (UiModeManager) getContext().getSystemService(Context.UI_MODE_SERVICE);
+        int uiModeType = uiModeManager != null
+            ? uiModeManager.getCurrentModeType()
+            : (configuration.uiMode & Configuration.UI_MODE_TYPE_MASK);
+        boolean hasLeanback = pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+        boolean isTelevision = uiModeType == Configuration.UI_MODE_TYPE_TELEVISION || hasLeanback;
+        boolean hasTouchscreen = pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN);
+        int smallestScreenWidthDp = configuration.smallestScreenWidthDp;
+        String deviceType = DeviceProfileClassifier.deviceType(
+            isTelevision,
+            hasLeanback,
+            hasTouchscreen,
+            smallestScreenWidthDp
+        );
+        boolean hasDpad = false;
+        boolean hasHardwareKeyboard = false;
+        String controllerName = null;
+
+        for (int deviceId : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(deviceId);
+            if (device == null || device.isVirtual()) continue;
+            int sources = device.getSources();
+            boolean dpad = (sources & InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD
+                || (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                || (sources & InputDevice.SOURCE_HDMI) == InputDevice.SOURCE_HDMI;
+            if (dpad) {
+                hasDpad = true;
+                if (controllerName == null && device.getName() != null && !device.getName().trim().isEmpty()) {
+                    controllerName = device.getName().trim();
+                }
+            }
+            if (device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC) {
+                hasHardwareKeyboard = true;
+            }
+        }
+
+        Intent voiceIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        boolean voiceInputAvailable = voiceIntent.resolveActivity(pm) != null;
+        Intent batteryIntent = getContext().registerReceiver(
+            null,
+            new IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        );
+        boolean hasBattery = batteryIntent != null
+            && batteryIntent.getBooleanExtra(BatteryManager.EXTRA_PRESENT, true);
+        boolean remoteUi = DeviceProfileClassifier.usesRemoteUi(
+            isTelevision,
+            hasDpad,
+            hasTouchscreen
+        );
+
+        JSObject profile = new JSObject();
+        profile.put("deviceType", deviceType);
+        profile.put("isTelevision", isTelevision);
+        profile.put("isTablet", "tablet".equals(deviceType));
+        profile.put("isHandheld", "handheld".equals(deviceType));
+        profile.put("hasLeanback", hasLeanback);
+        profile.put("hasTouchscreen", hasTouchscreen);
+        profile.put("hasDpad", hasDpad);
+        profile.put("hasHardwareKeyboard", hasHardwareKeyboard);
+        profile.put("smallestScreenWidthDp", smallestScreenWidthDp);
+        profile.put("hasBattery", hasBattery);
+        profile.put("remoteUi", remoteUi);
+        profile.put("touchUi", DeviceProfileClassifier.usesTouchUi(deviceType, hasTouchscreen));
+        profile.put("showBattery", DeviceProfileClassifier.showsBattery(deviceType, hasBattery));
+        profile.put("supportsLeanbackApps", isTelevision || hasLeanback);
+        profile.put("voiceInputAvailable", voiceInputAvailable);
+        profile.put("controllerName", controllerName == null ? JSONObject.NULL : controllerName);
+        call.resolve(profile);
+    }
+
+    @PluginMethod
+    public void requestVoiceInput(PluginCall call) {
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, call.getString("prompt", "Speak now"));
+        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+
+        if (intent.resolveActivity(getContext().getPackageManager()) == null) {
+            call.reject("Voice input is not available on this device", "VOICE_INPUT_UNAVAILABLE");
+            return;
+        }
+
+        try {
+            startActivityForResult(call, intent, "voiceInputResult");
+        } catch (Exception error) {
+            call.reject("Voice input could not open", "VOICE_INPUT_FAILED", error);
+        }
+    }
+
+    @ActivityCallback
+    private void voiceInputResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        Intent data = result.getData();
+        if (result.getResultCode() != Activity.RESULT_OK || data == null) {
+            call.reject("Voice input was cancelled", "VOICE_INPUT_CANCELLED");
+            return;
+        }
+        ArrayList<String> matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+        if (matches == null || matches.isEmpty() || matches.get(0) == null || matches.get(0).trim().isEmpty()) {
+            call.reject("No speech was recognized", "VOICE_INPUT_EMPTY");
+            return;
+        }
+        JSObject response = new JSObject();
+        response.put("text", matches.get(0).trim());
+        call.resolve(response);
+    }
+
+    @PluginMethod
+    public void resolveYouTubeChannel(PluginCall call) {
+        String input = call.getString("input", "");
+        final String lookupUrl;
+        try {
+            lookupUrl = YouTubeChannelResolver.lookupUrl(input);
+        } catch (IllegalArgumentException error) {
+            call.reject(error.getMessage(), "INVALID_YOUTUBE_CHANNEL");
+            return;
+        }
+        ioExecutor.execute(() -> performYouTubeChannelResolution(call, lookupUrl));
+    }
+
+    private void performYouTubeChannelResolution(PluginCall call, String lookupUrl) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(lookupUrl).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(15000);
+            connection.setInstanceFollowRedirects(true);
+            connection.setRequestProperty("Accept", "text/html,application/xhtml+xml");
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+            connection.setRequestProperty(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE
+                    + ") AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36"
+            );
+
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 200 && status < 300
+                ? connection.getInputStream()
+                : connection.getErrorStream();
+            String body = readStream(stream);
+            if (status == 404) {
+                call.reject(
+                    "That exact YouTube channel was not found. Try its unique @handle.",
+                    "YOUTUBE_CHANNEL_NOT_FOUND"
+                );
+                return;
+            }
+            if (status == 429) {
+                call.reject(
+                    "YouTube is temporarily limiting channel verification. Try again shortly.",
+                    "YOUTUBE_CHANNEL_RATE_LIMITED"
+                );
+                return;
+            }
+            if (status < 200 || status >= 300) {
+                call.reject("YouTube channel verification could not connect", "YOUTUBE_CHANNEL_LOOKUP_FAILED");
+                return;
+            }
+
+            YouTubeChannelResolver.ResolvedChannel resolved =
+                YouTubeChannelResolver.parseVerifiedPage(body);
+            JSObject channel = new JSObject();
+            channel.put("kind", "channel");
+            channel.put("sourceId", resolved.channelId);
+            channel.put("sourceUrl", resolved.canonicalUrl);
+            String title = plainText(resolved.title);
+            channel.put("title", title);
+            channel.put("channelTitle", title);
+            channel.put(
+                "thumbnailUrl",
+                resolved.thumbnailUrl == null ? JSONObject.NULL : resolved.thumbnailUrl
+            );
+            JSObject response = new JSObject();
+            response.put("channel", channel);
+            call.resolve(response);
+        } catch (IllegalArgumentException error) {
+            call.reject(
+                error.getMessage() + ". Try the channel's unique @handle.",
+                "YOUTUBE_CHANNEL_NOT_FOUND"
+            );
+        } catch (Exception error) {
+            call.reject(
+                "YouTube channel verification could not connect. Check this device's network.",
+                "YOUTUBE_CHANNEL_LOOKUP_FAILED",
+                error
+            );
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    @PluginMethod
+    public void getYouTubeChannelVideos(PluginCall call) {
+        String channelId = call.getString("channelId", "").trim();
+        String pageToken = call.getString("pageToken", "").trim();
+        final String catalogUrl;
+        try {
+            catalogUrl = YouTubeChannelCatalogParser.pageUrl(channelId);
+        } catch (IllegalArgumentException error) {
+            call.reject(error.getMessage(), "INVALID_YOUTUBE_CHANNEL");
+            return;
+        }
+
+        if (!pageToken.isEmpty()) {
+            final YouTubeCatalogCursor cursor;
+            synchronized (youtubeCatalogCursors) {
+                cursor = youtubeCatalogCursors.get(pageToken);
+            }
+            if (cursor == null || !channelId.equals(cursor.channelId)) {
+                call.reject("This channel page expired. Refresh the channel and try again.", "YOUTUBE_CHANNEL_PAGE_EXPIRED");
+                return;
+            }
+            ioExecutor.execute(() -> performYouTubeChannelContinuationLookup(call, pageToken, cursor));
+            return;
+        }
+
+        ioExecutor.execute(() -> performYouTubeChannelCatalogLookup(call, channelId, catalogUrl));
+    }
+
+    private void performYouTubeChannelCatalogLookup(
+        PluginCall call,
+        String channelId,
+        String catalogUrl
+    ) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(catalogUrl).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(15000);
+            connection.setInstanceFollowRedirects(true);
+            connection.setRequestProperty("Accept", "text/html,application/xhtml+xml");
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+            connection.setRequestProperty("User-Agent", youtubeWebUserAgent());
+
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 200 && status < 300
+                ? connection.getInputStream()
+                : connection.getErrorStream();
+            String body = readStream(stream);
+            if (status < 200 || status >= 300) {
+                throw new IllegalArgumentException("YouTube channel catalog is temporarily unavailable");
+            }
+
+            YouTubeChannelCatalogParser.InitialPage page =
+                YouTubeChannelCatalogParser.parseInitialPage(body, channelId);
+            String title = "YouTube Channel";
+            try {
+                title = YouTubeChannelResolver.parseVerifiedPage(body).title;
+            } catch (IllegalArgumentException ignored) {}
+            resolveYouTubeCatalogPage(
+                call,
+                channelId,
+                title,
+                page,
+                page.apiKey,
+                page.clientVersion,
+                "channel-page"
+            );
+        } catch (Exception catalogError) {
+            // Public YouTube page markup changes occasionally. Preserve the
+            // stable recent-feed experience while the full catalog parser is
+            // repaired instead of leaving the channel unusable.
+            performYouTubeChannelFeedLookup(
+                call,
+                channelId,
+                YouTubeChannelFeedParser.feedUrl(channelId)
+            );
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private void performYouTubeChannelContinuationLookup(
+        PluginCall call,
+        String pageToken,
+        YouTubeCatalogCursor cursor
+    ) {
+        HttpURLConnection connection = null;
+        try {
+            String clientVersion = YouTubeChannelCatalogParser.validateClientVersion(cursor.clientVersion);
+            String continuation = YouTubeChannelCatalogParser.validateContinuation(cursor.continuation);
+            connection = (HttpURLConnection) new URL(
+                YouTubeChannelCatalogParser.continuationUrl(cursor.apiKey)
+            ).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(15000);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            connection.setRequestProperty("Origin", "https://www.youtube.com");
+            connection.setRequestProperty("Referer", YouTubeChannelCatalogParser.pageUrl(cursor.channelId));
+            connection.setRequestProperty("User-Agent", youtubeWebUserAgent());
+            connection.setRequestProperty("X-YouTube-Client-Name", "2");
+            connection.setRequestProperty("X-YouTube-Client-Version", clientVersion);
+
+            JSONObject client = new JSONObject();
+            client.put("clientName", "MWEB");
+            client.put("clientVersion", clientVersion);
+            client.put("hl", "en");
+            client.put("gl", "US");
+            JSONObject context = new JSONObject();
+            context.put("client", client);
+            JSONObject request = new JSONObject();
+            request.put("context", context);
+            request.put("continuation", continuation);
+            byte[] requestBody = request.toString().getBytes(StandardCharsets.UTF_8);
+            connection.setFixedLengthStreamingMode(requestBody.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(requestBody);
+            }
+
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 200 && status < 300
+                ? connection.getInputStream()
+                : connection.getErrorStream();
+            String body = readStream(stream);
+            if (status == 429) {
+                call.reject("YouTube is temporarily limiting channel browsing", "YOUTUBE_CHANNEL_RATE_LIMITED");
+                return;
+            }
+            if (status < 200 || status >= 300) {
+                call.reject("OpenPanel could not load older channel videos", "YOUTUBE_CHANNEL_PAGE_FAILED");
+                return;
+            }
+
+            YouTubeChannelCatalogParser.CatalogPage page =
+                YouTubeChannelCatalogParser.parseContinuation(body);
+            synchronized (youtubeCatalogCursors) {
+                youtubeCatalogCursors.remove(pageToken);
+            }
+            resolveYouTubeCatalogPage(
+                call,
+                cursor.channelId,
+                "",
+                page,
+                cursor.apiKey,
+                clientVersion,
+                "channel-page"
+            );
+        } catch (IllegalArgumentException error) {
+            call.reject(error.getMessage(), "YOUTUBE_CHANNEL_PAGE_INVALID");
+        } catch (Exception error) {
+            call.reject(
+                "OpenPanel could not load older channel videos. Check this device's network.",
+                "YOUTUBE_CHANNEL_PAGE_FAILED",
+                error
+            );
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private void resolveYouTubeCatalogPage(
+        PluginCall call,
+        String channelId,
+        String channelTitle,
+        YouTubeChannelCatalogParser.CatalogPage page,
+        String apiKey,
+        String clientVersion,
+        String source
+    ) {
+        JSArray videos = new JSArray();
+        for (YouTubeChannelCatalogParser.CatalogVideo video : page.videos) {
+            JSObject item = new JSObject();
+            item.put("videoId", video.videoId);
+            item.put("title", plainText(video.title));
+            item.put("thumbnailUrl", video.thumbnailUrl);
+            item.put("publishedAt", video.publishedAt);
+            videos.put(item);
+        }
+        String nextPageToken = storeYouTubeCatalogCursor(
+            channelId,
+            apiKey,
+            clientVersion,
+            page.continuation
+        );
+        JSObject response = new JSObject();
+        response.put("channelTitle", plainText(channelTitle));
+        response.put("videos", videos);
+        response.put("nextPageToken", nextPageToken == null ? JSONObject.NULL : nextPageToken);
+        response.put("hasMore", nextPageToken != null);
+        response.put("catalogComplete", nextPageToken == null);
+        response.put("catalogSource", source);
+        call.resolve(response);
+    }
+
+    private String storeYouTubeCatalogCursor(
+        String channelId,
+        String apiKey,
+        String clientVersion,
+        String continuation
+    ) {
+        if (continuation == null || continuation.isEmpty()) return null;
+        String cursorId = UUID.randomUUID().toString();
+        YouTubeCatalogCursor cursor = new YouTubeCatalogCursor(
+            channelId,
+            apiKey,
+            clientVersion,
+            YouTubeChannelCatalogParser.validateContinuation(continuation)
+        );
+        synchronized (youtubeCatalogCursors) {
+            if (youtubeCatalogCursors.size() >= 64) {
+                Iterator<String> it = youtubeCatalogCursors.keySet().iterator();
+                if (it.hasNext()) { it.next(); it.remove(); }
+            }
+            youtubeCatalogCursors.put(cursorId, cursor);
+        }
+        return cursorId;
+    }
+
+    private static String youtubeWebUserAgent() {
+        return "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE
+            + ") AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36";
+    }
+
+    private void performYouTubeChannelFeedLookup(
+        PluginCall call,
+        String channelId,
+        String feedUrl
+    ) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(feedUrl).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(15000);
+            connection.setInstanceFollowRedirects(true);
+            connection.setRequestProperty("Accept", "application/atom+xml,application/xml,text/xml");
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("User-Agent", "OpenPanel/1.1 (Android " + Build.VERSION.RELEASE + ")");
+
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 200 && status < 300
+                ? connection.getInputStream()
+                : connection.getErrorStream();
+            String body = readStream(stream);
+            if (status == 404) {
+                call.reject("This channel's recent videos are unavailable", "YOUTUBE_CHANNEL_FEED_NOT_FOUND");
+                return;
+            }
+            if (status == 429) {
+                call.reject("YouTube is temporarily limiting channel browsing", "YOUTUBE_CHANNEL_RATE_LIMITED");
+                return;
+            }
+            if (status < 200 || status >= 300) {
+                call.reject("OpenPanel could not load this channel's videos", "YOUTUBE_CHANNEL_FEED_FAILED");
+                return;
+            }
+
+            YouTubeChannelFeedParser.ParsedFeed parsed =
+                YouTubeChannelFeedParser.parse(body, channelId);
+            JSArray videos = new JSArray();
+            for (YouTubeChannelFeedParser.FeedVideo video : parsed.videos) {
+                JSObject item = new JSObject();
+                item.put("videoId", video.videoId);
+                item.put("title", plainText(video.title));
+                item.put("thumbnailUrl", video.thumbnailUrl);
+                item.put("publishedAt", video.publishedAt);
+                videos.put(item);
+            }
+            JSObject response = new JSObject();
+            response.put("channelTitle", plainText(parsed.channelTitle));
+            response.put("videos", videos);
+            response.put("nextPageToken", JSONObject.NULL);
+            response.put("hasMore", false);
+            response.put("catalogComplete", false);
+            response.put("catalogSource", "recent-feed");
+            call.resolve(response);
+        } catch (IllegalArgumentException error) {
+            call.reject(error.getMessage(), "YOUTUBE_CHANNEL_FEED_INVALID");
+        } catch (Exception error) {
+            call.reject(
+                "OpenPanel could not load this channel's videos. Check this device's network.",
+                "YOUTUBE_CHANNEL_FEED_FAILED",
+                error
+            );
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static String readStream(InputStream stream) throws Exception {
+        if (stream == null) return "";
+        StringBuilder body = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                body.append(line);
+                if (body.length() > 2_000_000) {
+                    throw new IllegalArgumentException("YouTube returned an unexpectedly large channel page");
+                }
+            }
+        }
+        return body.toString();
+    }
+
+    private static String plainText(String value) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            return Html.fromHtml(value, Html.FROM_HTML_MODE_LEGACY).toString();
+        }
+        //noinspection deprecation
+        return Html.fromHtml(value).toString();
+    }
+
+    private static final class YouTubeCatalogCursor {
+        final String channelId;
+        final String apiKey;
+        final String clientVersion;
+        final String continuation;
+
+        YouTubeCatalogCursor(
+            String channelId,
+            String apiKey,
+            String clientVersion,
+            String continuation
+        ) {
+            this.channelId = channelId;
+            this.apiKey = apiKey;
+            this.clientVersion = clientVersion;
+            this.continuation = continuation;
+        }
+    }
 
     @Override
     public void load() {
@@ -79,6 +709,9 @@ public class SystemBridgePlugin extends Plugin {
                 if (!BluetoothAdapter.ACTION_STATE_CHANGED.equals(intent.getAction())) return;
                 int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR);
                 if (state == BluetoothAdapter.STATE_ON || state == BluetoothAdapter.STATE_OFF) {
+                    // A scan in progress won't get ACTION_DISCOVERY_FINISHED once
+                    // the adapter powers off — settle it now so it can't hang.
+                    if (state == BluetoothAdapter.STATE_OFF) finishBtScan();
                     JSObject data = new JSObject();
                     data.put("enabled", state == BluetoothAdapter.STATE_ON);
                     notifyListeners("bluetoothStateChanged", data);
@@ -86,14 +719,39 @@ public class SystemBridgePlugin extends Plugin {
             }
         };
         getContext().registerReceiver(btStateReceiver, new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED));
+
+        // Push battery changes the instant they happen. ACTION_BATTERY_CHANGED
+        // fires immediately when the charger is plugged/unplugged (the status
+        // extra flips) as well as on level changes, so the header no longer
+        // waits for the 15s status poll and can't show a stale "charging" state
+        // for a second or two after the charger is pulled.
+        batteryReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                notifyListeners("batteryChanged", readBattery(intent));
+            }
+        };
+        getContext().registerReceiver(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
     }
 
     @Override
     protected void handleOnDestroy() {
+        // Unregisters btScanReceiver, cancels the watchdog, and settles any
+        // in-flight scan call.
+        finishBtScan();
         if (btStateReceiver != null) {
             try { getContext().unregisterReceiver(btStateReceiver); } catch (Exception ignored) {}
             btStateReceiver = null;
         }
+        if (bondReceiver != null) {
+            try { getContext().unregisterReceiver(bondReceiver); } catch (Exception ignored) {}
+            bondReceiver = null;
+        }
+        if (batteryReceiver != null) {
+            try { getContext().unregisterReceiver(batteryReceiver); } catch (Exception ignored) {}
+            batteryReceiver = null;
+        }
+        ioExecutor.shutdownNow();
     }
 
     // ---------- Apps ----------
@@ -101,13 +759,12 @@ public class SystemBridgePlugin extends Plugin {
     @PluginMethod
     public void getInstalledApps(PluginCall call) {
         PackageManager pm = getContext().getPackageManager();
-        Intent main = new Intent(Intent.ACTION_MAIN, null);
-        main.addCategory(Intent.CATEGORY_LAUNCHER);
-        List<ResolveInfo> activities = pm.queryIntentActivities(main, 0);
+        List<ResolveInfo> activities = LaunchableAppCatalog.query(pm);
 
         Set<String> seen = new HashSet<>();
         JSArray apps = new JSArray();
         String self = getContext().getPackageName();
+        DevicePolicyManager policy = (DevicePolicyManager) getContext().getSystemService(Context.DEVICE_POLICY_SERVICE);
 
         for (ResolveInfo ri : activities) {
             String pkg = ri.activityInfo.packageName;
@@ -131,6 +788,7 @@ public class SystemBridgePlugin extends Plugin {
                 app.put("label", pm.getApplicationLabel(ai).toString());
                 app.put("isSystem", isSystem);
                 app.put("installer", installer);
+                app.put("lockTaskPermitted", isLockTaskPermitted(policy, pkg));
                 app.put("icon", drawableToBase64(pm.getApplicationIcon(ai)));
                 apps.put(app);
             } catch (Exception ignored) {}
@@ -139,6 +797,18 @@ public class SystemBridgePlugin extends Plugin {
         JSObject ret = new JSObject();
         ret.put("apps", apps);
         call.resolve(ret);
+    }
+
+    private boolean isLockTaskPermitted(DevicePolicyManager policy, String packageName) {
+        if (policy == null) return false;
+        try {
+            // ArborXR is the Device Owner and maintains Android's lock-task
+            // package allowlist. Installer provenance is not reliable here:
+            // managed APKs commonly report a null installing package.
+            return policy.isLockTaskPermitted(packageName);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     private String drawableToBase64(Drawable drawable) {
@@ -174,18 +844,40 @@ public class SystemBridgePlugin extends Plugin {
             return;
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        unpinIfPinned();
-        getContext().startActivity(intent);
-        call.resolve();
+        int lockState = lockTaskState();
+        Log.i(LOG_TAG, "External launch requested package=" + pkg
+            + " lockTask=" + lockTaskModeName(lockState));
+        try {
+            // In Device-Owner LOCKED mode Android only starts allowlisted
+            // packages (everything else is rejected with a lock-task
+            // violation), so merge the target into the allowlist first; the
+            // kiosk stays engaged while the launched app runs.
+            if (lockState == ActivityManager.LOCK_TASK_MODE_LOCKED) {
+                KioskLock.applyDeviceOwnerLockdown(getContext(), Collections.singletonList(pkg));
+            }
+            unpinIfPinned();
+            getContext().startActivity(intent);
+            Log.i(LOG_TAG, "External launch accepted package=" + pkg);
+            call.resolve();
+        } catch (RuntimeException error) {
+            Log.e(LOG_TAG, "External launch failed package=" + pkg, error);
+            call.reject("Could not launch " + pkg + ": " + error.getMessage(),
+                "APP_LAUNCH_FAILED", error);
+        }
     }
 
     // ---------- Battery ----------
 
     @PluginMethod
     public void getBatteryInfo(PluginCall call) {
-        IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
-        Intent batteryStatus = getContext().registerReceiver(null, filter);
+        Intent batteryStatus = getContext().registerReceiver(
+            null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        call.resolve(readBattery(batteryStatus));
+    }
 
+    // Shared by getBatteryInfo (pull) and the batteryChanged event (push) so
+    // both report level/charging identically.
+    private static JSObject readBattery(Intent batteryStatus) {
         JSObject ret = new JSObject();
         if (batteryStatus != null) {
             int level = batteryStatus.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
@@ -199,7 +891,7 @@ public class SystemBridgePlugin extends Plugin {
             ret.put("level", -1);
             ret.put("isCharging", false);
         }
-        call.resolve(ret);
+        return ret;
     }
 
     // ---------- Wi-Fi ----------
@@ -311,6 +1003,15 @@ public class SystemBridgePlugin extends Plugin {
             return;
         }
 
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            connectLegacyWifi(call, ssid, password);
+            return;
+        }
+        connectSuggestedWifi(call, ssid, password);
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private void connectSuggestedWifi(PluginCall call, String ssid, String password) {
         WifiManager wifi = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
 
         WifiNetworkSuggestion.Builder builder = new WifiNetworkSuggestion.Builder().setSsid(ssid);
@@ -320,15 +1021,47 @@ public class SystemBridgePlugin extends Plugin {
         List<WifiNetworkSuggestion> suggestions = new ArrayList<>();
         suggestions.add(builder.build());
 
-        // An empty list removes all of this app's previous suggestions, so a
-        // re-connect with a corrected password replaces the stale credential.
-        wifi.removeNetworkSuggestions(new ArrayList<>());
+        // Add first; only clear the app's existing suggestion if Android reports
+        // this SSID is already suggested (e.g. reconnecting with a corrected
+        // password). Removing up-front would drop a working credential even when
+        // the new add later fails for an unrelated reason.
         int status = wifi.addNetworkSuggestions(suggestions);
+        if (status == WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_ADD_DUPLICATE) {
+            wifi.removeNetworkSuggestions(new ArrayList<>());
+            status = wifi.addNetworkSuggestions(suggestions);
+        }
 
         JSObject ret = new JSObject();
         ret.put("status", status == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS ? "suggested" : "error");
         ret.put("code", status);
         call.resolve(ret);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void connectLegacyWifi(PluginCall call, String ssid, String password) {
+        WifiManager wifi = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        WifiConfiguration configuration = new WifiConfiguration();
+        configuration.SSID = quoteWifiValue(ssid);
+        if (password == null || password.isEmpty()) {
+            configuration.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
+        } else {
+            configuration.preSharedKey = quoteWifiValue(password);
+        }
+
+        int networkId = wifi.addNetwork(configuration);
+        if (networkId < 0 || !wifi.enableNetwork(networkId, true)) {
+            call.reject("Android rejected the network request", "WIFI_REJECTED");
+            return;
+        }
+        wifi.reconnect();
+        JSObject ret = new JSObject();
+        ret.put("status", "suggested");
+        ret.put("code", 0); // STATUS_NETWORK_SUGGESTIONS_SUCCESS; inlined for API 24-28.
+        call.resolve(ret);
+    }
+
+    private String quoteWifiValue(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
     @PluginMethod
@@ -338,10 +1071,46 @@ public class SystemBridgePlugin extends Plugin {
             call.reject("ssid is required");
             return;
         }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            forgetLegacyWifi(call, ssid);
+            return;
+        }
+        forgetSuggestedWifi(call);
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private void forgetSuggestedWifi(PluginCall call) {
         WifiManager wifi = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        List<WifiNetworkSuggestion> suggestions = new ArrayList<>();
-        suggestions.add(new WifiNetworkSuggestion.Builder().setSsid(ssid).build());
-        wifi.removeNetworkSuggestions(suggestions);
+        // OpenPanel keeps only one active suggestion, so an empty list removes
+        // every suggestion owned by this app without retaining a Wi-Fi secret.
+        wifi.removeNetworkSuggestions(new ArrayList<>());
+        call.resolve();
+    }
+
+    @SuppressWarnings("deprecation")
+    private void forgetLegacyWifi(PluginCall call, String ssid) {
+        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            call.reject("Location permission is required to forget this Wi-Fi network", "PERMISSION_DENIED");
+            return;
+        }
+        WifiManager wifi = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        List<WifiConfiguration> configured;
+        try {
+            configured = wifi.getConfiguredNetworks();
+        } catch (SecurityException e) {
+            call.reject("Location permission is required to forget this Wi-Fi network", "PERMISSION_DENIED");
+            return;
+        }
+        if (configured != null) {
+            String quotedSsid = quoteWifiValue(ssid);
+            for (WifiConfiguration configuration : configured) {
+                if (quotedSsid.equals(configuration.SSID)) {
+                    wifi.removeNetwork(configuration.networkId);
+                    wifi.saveConfiguration();
+                }
+            }
+        }
         call.resolve();
     }
 
@@ -366,10 +1135,9 @@ public class SystemBridgePlugin extends Plugin {
     }
 
     private boolean hasBtPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            return getPermissionState("bluetooth") == PermissionState.GRANTED;
-        }
-        return true;
+        return BluetoothAccess.canReadAdapterState(
+                Build.VERSION.SDK_INT,
+                getPermissionState("bluetooth") == PermissionState.GRANTED);
     }
 
     private boolean isDeviceConnected(BluetoothDevice device) {
@@ -388,14 +1156,34 @@ public class SystemBridgePlugin extends Plugin {
         if (adapter == null) {
             ret.put("available", false);
             ret.put("enabled", false);
+            ret.put("permissionGranted", true);
             call.resolve(ret);
             return;
         }
         ret.put("available", true);
-        ret.put("enabled", adapter.isEnabled());
-
         JSArray devices = new JSArray();
-        if (adapter.isEnabled() && hasBtPermissions()) {
+        boolean permissionGranted = hasBtPermissions();
+        ret.put("permissionGranted", permissionGranted);
+        if (!permissionGranted) {
+            ret.put("enabled", false);
+            ret.put("devices", devices);
+            call.resolve(ret);
+            return;
+        }
+
+        boolean enabled;
+        try {
+            enabled = adapter.isEnabled();
+        } catch (SecurityException e) {
+            ret.put("permissionGranted", false);
+            ret.put("enabled", false);
+            ret.put("devices", devices);
+            call.resolve(ret);
+            return;
+        }
+        ret.put("enabled", enabled);
+
+        if (enabled) {
             try {
                 for (BluetoothDevice d : adapter.getBondedDevices()) {
                     JSObject dev = new JSObject();
@@ -436,6 +1224,10 @@ public class SystemBridgePlugin extends Plugin {
             return;
         }
 
+        // Settle any scan still in flight (resolves it with what it found) so its
+        // kept-alive call is never orphaned by this new scan.
+        finishBtScan();
+
         synchronized (btScanResults) {
             btScanResults.clear();
         }
@@ -459,6 +1251,9 @@ public class SystemBridgePlugin extends Plugin {
         }
 
         call.setKeepAlive(true);
+        synchronized (btScanLock) {
+            btScanCall = call;
+        }
         final Set<String> seen = new HashSet<>();
         synchronized (btScanResults) {
             for (JSObject d : btScanResults) seen.add(d.getString("address"));
@@ -484,7 +1279,7 @@ public class SystemBridgePlugin extends Plugin {
                         }
                     } catch (SecurityException ignored) {}
                 } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action)) {
-                    finishBtScan(call);
+                    finishBtScan();
                 }
             }
         };
@@ -494,20 +1289,53 @@ public class SystemBridgePlugin extends Plugin {
         filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
         getContext().registerReceiver(btScanReceiver, filter);
 
+        boolean started;
         try {
-            if (!adapter.startDiscovery()) {
-                finishBtScan(call);
-            }
+            started = adapter.startDiscovery();
         } catch (SecurityException e) {
-            finishBtScan(call);
+            started = false;
+        }
+        if (started) {
+            // Watchdog: discovery normally emits ACTION_DISCOVERY_FINISHED in
+            // ~12s, but if the adapter is turned off mid-scan (or the broadcast
+            // is otherwise missed) that never arrives. Settle the call anyway so
+            // the UI's "scanning" state can't get stuck on.
+            synchronized (btScanLock) {
+                btScanTimeout = new Runnable() {
+                    @Override public void run() { finishBtScan(); }
+                };
+                mainHandler.postDelayed(btScanTimeout, BT_SCAN_TIMEOUT_MS);
+            }
+        } else {
+            finishBtScan();
         }
     }
 
-    private void finishBtScan(PluginCall call) {
+    private void unregisterBondReceiver() {
+        if (bondReceiver != null) {
+            try { getContext().unregisterReceiver(bondReceiver); } catch (Exception ignored) {}
+            bondReceiver = null;
+        }
+    }
+
+    // Settles the in-flight scan exactly once. Safe to call from the discovery
+    // broadcast, the watchdog, adapter-off, a new scan, or teardown; extra calls
+    // after the first are no-ops because btScanCall is cleared atomically.
+    private void finishBtScan() {
+        PluginCall call;
+        synchronized (btScanLock) {
+            call = btScanCall;
+            btScanCall = null;
+            if (btScanTimeout != null) {
+                mainHandler.removeCallbacks(btScanTimeout);
+                btScanTimeout = null;
+            }
+        }
         if (btScanReceiver != null) {
             try { getContext().unregisterReceiver(btScanReceiver); } catch (Exception ignored) {}
             btScanReceiver = null;
         }
+        if (call == null) return;
         JSArray devices = new JSArray();
         synchronized (btScanResults) {
             for (JSObject d : btScanResults) devices.put(d);
@@ -526,12 +1354,16 @@ public class SystemBridgePlugin extends Plugin {
             return;
         }
         BluetoothAdapter adapter = getBtAdapter();
-        if (adapter == null || !adapter.isEnabled()) {
-            call.reject("Bluetooth is disabled", "BT_DISABLED");
+        if (adapter == null) {
+            call.reject("Bluetooth unavailable");
             return;
         }
         if (!hasBtPermissions()) {
             call.reject("Bluetooth permission not granted", "PERMISSION_DENIED");
+            return;
+        }
+        if (!adapter.isEnabled()) {
+            call.reject("Bluetooth is disabled", "BT_DISABLED");
             return;
         }
 
@@ -545,21 +1377,30 @@ public class SystemBridgePlugin extends Plugin {
                 return;
             }
 
+            // Only one pairing can be in flight; drop any stale receiver so it
+            // is tracked in a field and handleOnDestroy can always unregister it
+            // (the terminal BONDED/NONE broadcast may never arrive if the plugin
+            // is torn down while the system pairing dialog is still open).
+            if (bondReceiver != null) {
+                try { getContext().unregisterReceiver(bondReceiver); } catch (Exception ignored) {}
+                bondReceiver = null;
+            }
+
             call.setKeepAlive(true);
-            BroadcastReceiver bondReceiver = new BroadcastReceiver() {
+            bondReceiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     BluetoothDevice d = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                     if (d == null || !address.equals(d.getAddress())) return;
                     int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
                     if (state == BluetoothDevice.BOND_BONDED) {
-                        try { context.unregisterReceiver(this); } catch (Exception ignored) {}
+                        unregisterBondReceiver();
                         JSObject ret = new JSObject();
                         ret.put("status", "paired");
                         call.setKeepAlive(false);
                         call.resolve(ret);
                     } else if (state == BluetoothDevice.BOND_NONE) {
-                        try { context.unregisterReceiver(this); } catch (Exception ignored) {}
+                        unregisterBondReceiver();
                         call.setKeepAlive(false);
                         call.reject("Pairing failed or was cancelled", "PAIR_FAILED");
                     }
@@ -568,11 +1409,12 @@ public class SystemBridgePlugin extends Plugin {
             getContext().registerReceiver(bondReceiver, new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED));
 
             if (!device.createBond()) {
-                try { getContext().unregisterReceiver(bondReceiver); } catch (Exception ignored) {}
+                unregisterBondReceiver();
                 call.setKeepAlive(false);
                 call.reject("Could not start pairing", "PAIR_FAILED");
             }
         } catch (SecurityException e) {
+            unregisterBondReceiver();
             call.setKeepAlive(false);
             call.reject("Bluetooth permission not granted", "PERMISSION_DENIED");
         }
@@ -588,6 +1430,10 @@ public class SystemBridgePlugin extends Plugin {
         BluetoothAdapter adapter = getBtAdapter();
         if (adapter == null) {
             call.reject("Bluetooth unavailable");
+            return;
+        }
+        if (!hasBtPermissions()) {
+            call.reject("Bluetooth permission not granted", "PERMISSION_DENIED");
             return;
         }
         try {
@@ -610,11 +1456,7 @@ public class SystemBridgePlugin extends Plugin {
             call.reject("Bluetooth unavailable");
             return;
         }
-        if (enabled == adapter.isEnabled()) {
-            call.resolve();
-            return;
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !hasBtPermissions()) {
+        if (!hasBtPermissions()) {
             requestPermissionForAlias("bluetooth", call, "btTogglePermsCallback");
             return;
         }
@@ -631,6 +1473,28 @@ public class SystemBridgePlugin extends Plugin {
     }
 
     private void doToggleBluetooth(PluginCall call, boolean enabled) {
+        // Keep the framework permission check inline: Android lint recognizes
+        // this guard and the runtime still handles a permission revoked in-flight.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && ContextCompat.checkSelfPermission(getContext(), Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED) {
+            call.reject("Bluetooth permission is required", "PERMISSION_DENIED");
+            return;
+        }
+        BluetoothAdapter adapter = getBtAdapter();
+        if (adapter == null) {
+            call.reject("Bluetooth unavailable");
+            return;
+        }
+        try {
+            if (enabled == adapter.isEnabled()) {
+                call.resolve();
+                return;
+            }
+        } catch (SecurityException e) {
+            call.reject("Bluetooth permission is required", "PERMISSION_DENIED");
+            return;
+        }
         // Apps targeting API 33+ cannot flip Bluetooth silently; both directions
         // go through a system confirmation dialog.
         String action = enabled
@@ -655,6 +1519,25 @@ public class SystemBridgePlugin extends Plugin {
         unpinIfPinned();
         getActivity().startActivity(intent);
         call.resolve();
+    }
+
+    @PluginMethod
+    public void openSystemSettings(PluginCall call) {
+        Intent intent = new Intent(Settings.ACTION_SETTINGS);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        int lockState = lockTaskState();
+        Log.i(LOG_TAG, "Full Android settings requested lockTask="
+            + lockTaskModeName(lockState));
+        try {
+            unpinIfPinned();
+            getActivity().startActivity(intent);
+            Log.i(LOG_TAG, "Full Android settings launch accepted");
+            call.resolve();
+        } catch (RuntimeException error) {
+            Log.e(LOG_TAG, "Full Android settings launch failed", error);
+            call.reject("Could not open full Android settings: " + error.getMessage(),
+                "SYSTEM_SETTINGS_FAILED", error);
+        }
     }
 
     // ---------- Kiosk lock (standalone / non-ArborXR mode) ----------
@@ -714,6 +1597,33 @@ public class SystemBridgePlugin extends Plugin {
         ret.put("defaultLauncher", isDefaultLauncher());
         ret.put("lockTaskActive", state != ActivityManager.LOCK_TASK_MODE_NONE);
         ret.put("lockTaskMode", lockTaskModeName(state));
+        ret.put("managementMode", KioskState.getMode(getContext()));
+        ret.put("kioskEnabled", KioskState.isEnabled(getContext()));
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void setManagementMode(PluginCall call) {
+        String requestedMode = call.getString("mode", KioskState.MODE_COMPANION);
+        String mode = KioskState.normalizeMode(requestedMode);
+        boolean wasEnabled = KioskState.isEnabled(getContext());
+        KioskState.setMode(getContext(), mode);
+
+        if (KioskState.MODE_COMPANION.equals(mode)) {
+            KioskState.setEnabled(getContext(), false);
+            if (wasEnabled) {
+                getActivity().runOnUiThread(() -> {
+                    try {
+                        if (lockTaskState() != ActivityManager.LOCK_TASK_MODE_NONE) {
+                            getActivity().stopLockTask();
+                        }
+                    } catch (Exception ignored) {}
+                });
+            }
+        }
+
+        JSObject ret = new JSObject();
+        ret.put("mode", mode);
         call.resolve(ret);
     }
 
@@ -731,10 +1641,17 @@ public class SystemBridgePlugin extends Plugin {
         intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin);
         intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
                 "Enable so OpenPanel can lock this device into kiosk mode.");
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        // The system DeviceAdminAdd screen refuses to launch as a new task
+        // ("Cannot start ADD_DEVICE_ADMIN as a new task"), so start it in the
+        // launcher's own task (no FLAG_ACTIVITY_NEW_TASK).
         unpinIfPinned();
-        getActivity().startActivity(intent);
-        call.resolve();
+        try {
+            getActivity().startActivity(intent);
+            call.resolve();
+        } catch (RuntimeException error) {
+            call.reject("Could not open the device-admin prompt: " + error.getMessage(),
+                    "DEVICE_ADMIN_FAILED", error);
+        }
     }
 
     @PluginMethod
@@ -754,28 +1671,32 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void enableKioskLock(final PluginCall call) {
+        if (!KioskState.MODE_STANDALONE.equals(KioskState.getMode(getContext()))) {
+            call.reject("OpenPanel only starts its own kiosk lock in standalone mode", "WRONG_MODE");
+            return;
+        }
         final DevicePolicyManager dpm = dpm();
         final String pkg = getContext().getPackageName();
+        final boolean deviceOwner = dpm != null && dpm.isDeviceOwnerApp(pkg);
 
-        // As Device Owner we allowlist ourselves (plus any caller-supplied apps)
-        // so lock-task is the strong, silent kind and launched apps stay pinned.
+        // As Device Owner, allowlist OpenPanel + the caller-supplied apps and hide
+        // the status bar/notifications so startLockTask() below enters the strong,
+        // silent LOCKED kiosk (like Fully) and launched apps stay inside it.
         // Otherwise startLockTask() falls back to user-confirmed screen pinning.
-        if (dpm != null && dpm.isDeviceOwnerApp(pkg)) {
-            List<String> allow = new ArrayList<>();
-            allow.add(pkg);
-            JSArray packages = call.getArray("packages");
-            if (packages != null) {
-                for (int i = 0; i < packages.length(); i++) {
-                    String p = packages.optString(i, null);
-                    if (p != null && !p.isEmpty() && !allow.contains(p)) allow.add(p);
-                }
+        List<String> extra = new ArrayList<>();
+        JSArray packages = call.getArray("packages");
+        if (packages != null) {
+            for (int i = 0; i < packages.length(); i++) {
+                String p = packages.optString(i, null);
+                if (p != null && !p.isEmpty()) extra.add(p);
             }
-            try {
-                dpm.setLockTaskPackages(OpenPanelDeviceAdminReceiver.getComponentName(getContext()),
-                        allow.toArray(new String[0]));
-            } catch (Exception ignored) {}
+        }
+        final boolean strongLock = KioskLock.applyDeviceOwnerLockdown(getContext(), extra);
+        if (deviceOwner && !strongLock) {
+            Log.w(LOG_TAG, "Device-owner lockdown failed; kiosk will be screen-pinning only");
         }
 
+        KioskState.setEnabled(getContext(), true);
         getActivity().runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -783,8 +1704,11 @@ public class SystemBridgePlugin extends Plugin {
                     getActivity().startLockTask();
                     JSObject ret = new JSObject();
                     ret.put("status", lockTaskModeName(lockTaskState()));
+                    ret.put("deviceOwner", deviceOwner);
+                    ret.put("allowlisted", strongLock);
                     call.resolve(ret);
                 } catch (Exception e) {
+                    KioskState.setEnabled(getContext(), false);
                     call.reject("Could not enter kiosk lock: " + e.getMessage(), "LOCK_FAILED");
                 }
             }
@@ -793,16 +1717,230 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void disableKioskLock(final PluginCall call) {
+        KioskState.setEnabled(getContext(), false);
+        // Restore the status bar / notification shade that enableKioskLock hid
+        // as Device Owner, so exiting the kiosk returns a normal, usable device.
+        final DevicePolicyManager dpm = dpm();
+        final String pkg = getContext().getPackageName();
+        if (dpm != null && dpm.isDeviceOwnerApp(pkg)) {
+            try {
+                dpm.setStatusBarDisabled(OpenPanelDeviceAdminReceiver.getComponentName(getContext()), false);
+            } catch (Exception ignored) {}
+        }
         getActivity().runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    getActivity().stopLockTask();
+                    if (lockTaskState() != ActivityManager.LOCK_TASK_MODE_NONE) {
+                        getActivity().stopLockTask();
+                    }
                     call.resolve();
                 } catch (Exception e) {
                     call.reject("Could not exit kiosk lock: " + e.getMessage(), "UNLOCK_FAILED");
                 }
             }
         });
+    }
+
+    // Fully relinquish Device Owner so the operator can hand the tablet back to
+    // normal management without a factory reset. Restores the status bar, ends
+    // any lock task, and clears device ownership. Only the DO app itself can do
+    // this, so it's the safe escape hatch from a provisioned kiosk.
+    @PluginMethod
+    public void clearDeviceOwner(final PluginCall call) {
+        final DevicePolicyManager dpm = dpm();
+        final String pkg = getContext().getPackageName();
+        if (dpm == null || !dpm.isDeviceOwnerApp(pkg)) {
+            call.reject("OpenPanel is not the device owner", "NOT_DEVICE_OWNER");
+            return;
+        }
+        KioskState.setEnabled(getContext(), false);
+        getActivity().runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ComponentName adminName = OpenPanelDeviceAdminReceiver.getComponentName(getContext());
+                    try { dpm.setStatusBarDisabled(adminName, false); } catch (Exception ignored) {}
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        try { dpm.setLockTaskFeatures(adminName,
+                                DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS); } catch (Exception ignored) {}
+                    }
+                    try { dpm.setLockTaskPackages(adminName, new String[0]); } catch (Exception ignored) {}
+                    if (lockTaskState() != ActivityManager.LOCK_TASK_MODE_NONE) {
+                        try { getActivity().stopLockTask(); } catch (Exception ignored) {}
+                    }
+                    dpm.clearDeviceOwnerApp(pkg);
+                    JSObject ret = new JSObject();
+                    ret.put("cleared", true);
+                    call.resolve(ret);
+                } catch (Exception e) {
+                    call.reject("Could not clear device owner: " + e.getMessage(), "CLEAR_DO_FAILED");
+                }
+            }
+        });
+    }
+
+    // ---------- Fully-style permissions & special app access ----------
+
+    // One snapshot of every grant the kiosk cares about. The UI shows a row per
+    // entry, auto-grants what a Device Owner can, and deep-links the rest.
+    @PluginMethod
+    public void getPermissionStatus(PluginCall call) {
+        Context ctx = getContext();
+        DevicePolicyManager dpm = dpm();
+        String pkg = ctx.getPackageName();
+        boolean deviceOwner = dpm != null && dpm.isDeviceOwnerApp(pkg);
+
+        JSObject r = new JSObject();
+        r.put("deviceOwner", deviceOwner);
+        r.put("deviceAdmin", dpm != null
+            && dpm.isAdminActive(OpenPanelDeviceAdminReceiver.getComponentName(ctx)));
+        r.put("defaultLauncher", isDefaultLauncher());
+        r.put("location", getPermissionState("location") == PermissionState.GRANTED);
+        r.put("bluetooth", hasBtPermissions());
+        r.put("accessibility", DeviceAccess.isAccessibilityServiceEnabled(ctx));
+        r.put("overlay", DeviceAccess.canDrawOverlays(ctx));
+        r.put("usageAccess", DeviceAccess.hasUsageAccess(ctx));
+        r.put("writeSettings", DeviceAccess.canWriteSettings(ctx));
+        r.put("batteryUnrestricted", DeviceAccess.isIgnoringBatteryOptimizations(ctx));
+        r.put("keyguardDisabled", KioskState.isKeyguardDisabled(ctx));
+        call.resolve(r);
+    }
+
+    // As Device Owner, silently grant OpenPanel's own dangerous runtime
+    // permissions so onboarding never has to prompt for Wi-Fi scanning or
+    // Bluetooth. No-op (deviceOwner:false) when not the owner — the UI then
+    // falls back to the normal runtime prompts.
+    @PluginMethod
+    public void autoGrantSelfPermissions(PluginCall call) {
+        DevicePolicyManager dpm = dpm();
+        String pkg = getContext().getPackageName();
+        JSObject r = new JSObject();
+        if (dpm == null || !dpm.isDeviceOwnerApp(pkg)) {
+            r.put("deviceOwner", false);
+            r.put("granted", 0);
+            call.resolve(r);
+            return;
+        }
+        ComponentName admin = OpenPanelDeviceAdminReceiver.getComponentName(getContext());
+        java.util.List<String> perms = new java.util.ArrayList<>();
+        perms.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        perms.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            perms.add(Manifest.permission.BLUETOOTH_CONNECT);
+            perms.add(Manifest.permission.BLUETOOTH_SCAN);
+        }
+        int granted = 0;
+        for (String p : perms) {
+            try {
+                if (dpm.setPermissionGrantState(admin, pkg, p,
+                        DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED)) {
+                    granted++;
+                }
+            } catch (Exception ignored) {}
+        }
+        r.put("deviceOwner", true);
+        r.put("granted", granted);
+        call.resolve(r);
+    }
+
+    // Device-Owner only: hide (or restore) the swipe lock screen so a kiosk wakes
+    // straight into OpenPanel. Remembered in KioskState and re-applied on launch.
+    @PluginMethod
+    public void setKeyguardDisabled(PluginCall call) {
+        boolean disabled = Boolean.TRUE.equals(call.getBoolean("disabled", Boolean.TRUE));
+        DevicePolicyManager dpm = dpm();
+        if (dpm == null || !dpm.isDeviceOwnerApp(getContext().getPackageName())) {
+            call.reject("OpenPanel is not the device owner", "NOT_DEVICE_OWNER");
+            return;
+        }
+        boolean applied;
+        try {
+            applied = dpm.setKeyguardDisabled(
+                OpenPanelDeviceAdminReceiver.getComponentName(getContext()), disabled);
+        } catch (Exception e) {
+            call.reject("Could not change the lock screen: " + e.getMessage(), "KEYGUARD_FAILED");
+            return;
+        }
+        // setKeyguardDisabled refuses when a PIN/password is set; report the real
+        // outcome so the UI doesn't claim success when the lock screen stays.
+        KioskState.setKeyguardDisabled(getContext(), disabled && applied);
+        JSObject r = new JSObject();
+        r.put("disabled", disabled && applied);
+        r.put("applied", applied);
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void openAccessibilitySettings(PluginCall call) {
+        launchSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+    }
+
+    @PluginMethod
+    public void openOverlaySettings(PluginCall call) {
+        launchSettings(call, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:" + getContext().getPackageName())));
+    }
+
+    @PluginMethod
+    public void openUsageAccessSettings(PluginCall call) {
+        launchSettings(call, new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS));
+    }
+
+    @PluginMethod
+    public void openWriteSettings(PluginCall call) {
+        launchSettings(call, new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS,
+            Uri.parse("package:" + getContext().getPackageName())));
+    }
+
+    @PluginMethod
+    public void requestIgnoreBatteryOptimizations(PluginCall call) {
+        if (DeviceAccess.isIgnoringBatteryOptimizations(getContext())) {
+            JSObject r = new JSObject();
+            r.put("granted", true);
+            call.resolve(r);
+            return;
+        }
+        launchSettings(call, new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:" + getContext().getPackageName())));
+    }
+
+    // Everything above deep-links a Settings screen. Both plain PINNED and
+    // Device-Owner LOCKED lock tasks block launching a non-allowlisted Settings
+    // activity, so leave the lock task first; MainActivity re-pins the moment
+    // OpenPanel regains focus (so an operator-driven grant is a brief detour).
+    private void launchSettings(final PluginCall call, final Intent intent) {
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        getActivity().runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (lockTaskState() != ActivityManager.LOCK_TASK_MODE_NONE) {
+                        try { getActivity().stopLockTask(); } catch (Exception ignored) {}
+                    }
+                    getActivity().startActivity(intent);
+                    call.resolve();
+                } catch (RuntimeException error) {
+                    call.reject("Could not open settings: " + error.getMessage(),
+                        "SETTINGS_FAILED", error);
+                }
+            }
+        });
+    }
+
+    // Data for an on-device Device-Owner provisioning QR (factory-reset flow):
+    // the admin component + this build's signing checksum. The operator supplies
+    // the hosted APK download URL; TS assembles the final QR JSON. Lets a fresh
+    // device be provisioned without adb — ArborXR-managed devices get their owner
+    // from ArborXR instead and never use this.
+    @PluginMethod
+    public void getProvisioningPayload(PluginCall call) {
+        Context ctx = getContext();
+        JSObject r = new JSObject();
+        r.put("packageName", ctx.getPackageName());
+        r.put("component",
+            OpenPanelDeviceAdminReceiver.getComponentName(ctx).flattenToString());
+        r.put("checksum", DeviceAccess.signingChecksum(ctx));
+        call.resolve(r);
     }
 }
