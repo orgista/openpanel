@@ -2,8 +2,13 @@ package com.orgista.openpanel;
 
 import android.app.ActivityManager;
 import android.content.Context;
+import android.content.Intent;
+import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
+import android.webkit.WebView;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -11,11 +16,94 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
+    private static final String LOG_TAG = "OpenPanel";
+    private static final String DISPATCH_REMOTE_BACK_SCRIPT =
+        "(function(){"
+            + "var scopes=Array.prototype.slice.call(document.querySelectorAll('[data-dpad-scope]'));"
+            + "var target=document.body;var highest=-2147483648;"
+            + "scopes.forEach(function(scope){"
+                + "var rect=scope.getBoundingClientRect();var style=getComputedStyle(scope);"
+                + "if(rect.width<=0||rect.height<=0||style.display==='none'||style.visibility==='hidden'||scope.getAttribute('aria-hidden')==='true')return;"
+                + "var z=parseInt(style.zIndex,10);if(isNaN(z))z=0;"
+                + "if(z>=highest){highest=z;target=scope;}"
+            + "});"
+            + "target.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));"
+        + "})();";
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(SystemBridgePlugin.class);
         super.onCreate(savedInstanceState);
+        logLifecycle("created");
+        installRemoteBackHandler();
+        configureWebViewTextInput();
         hideSystemBars();
+    }
+
+    @Override
+    public void onStart() {
+        super.onStart();
+        logLifecycle("started");
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        logLifecycle("resumed");
+    }
+
+    @Override
+    public void onPause() {
+        logLifecycle("paused");
+        super.onPause();
+    }
+
+    @Override
+    public void onStop() {
+        logLifecycle("stopped");
+        super.onStop();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        Log.i(LOG_TAG, "Activity received new intent action="
+            + (intent != null ? intent.getAction() : "null"));
+    }
+
+    private void logLifecycle(String state) {
+        ActivityManager activityManager =
+            (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        int lockState = activityManager != null
+            ? activityManager.getLockTaskModeState()
+            : ActivityManager.LOCK_TASK_MODE_NONE;
+        Log.i(LOG_TAG, "Activity " + state + " lockTask=" + lockState);
+    }
+
+    private void installRemoteBackHandler() {
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                WebView webView = getBridge().getWebView();
+                if (webView == null) return;
+                Log.i(LOG_TAG, "Remote Back dispatched to the active OpenPanel screen");
+                webView.evaluateJavascript(DISPATCH_REMOTE_BACK_SCRIPT, null);
+            }
+        });
+    }
+
+    private void configureWebViewTextInput() {
+        WebView webView = getBridge().getWebView();
+        if (webView == null) return;
+
+        // Android 14 enables stylus handwriting automatically for WebView
+        // editors. On the Lenovo TB132FU its pen digitizer can trigger a large
+        // handwriting/selection popup over Gboard, so OpenPanel keeps its
+        // ordinary keyboard and voice-input paths and opts out of that overlay.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            webView.setAutoHandwritingEnabled(false);
+        }
     }
 
     @Override
@@ -23,19 +111,24 @@ public class MainActivity extends BridgeActivity {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             hideSystemBars();
-            pinKioskIfUnlocked();
+            if (KioskState.shouldAutoPin(this)) pinKioskIfUnlocked();
         }
     }
 
-    // Screen pinning needs no Device Owner, so this closes the gesture-nav
-    // "swipe up and hold" app dock and the Overview/Recents screen on every
-    // device, companion or standalone. Re-engages whenever this activity
-    // regains window focus (e.g. backing out of a launched app);
+    // In explicitly enabled standalone mode, screen pinning closes the
+    // gesture-nav app dock and Overview/Recents. Companion mode never starts
+    // its own lock task because ArborXR owns device policy there. Re-engages
+    // whenever this activity regains focus (e.g. backing out of a launched app);
     // SystemBridgePlugin unpins first whenever it deliberately starts another
     // activity (launching an app, opening a settings screen).
     private void pinKioskIfUnlocked() {
         ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
         if (am == null || am.getLockTaskModeState() != ActivityManager.LOCK_TASK_MODE_NONE) return;
+        // As Device Owner, allowlist ourselves + hide the status bar first so
+        // startLockTask() enters silent LOCKED mode. Without this it falls back
+        // to user-confirmed screen pinning and Android shows the "App is pinned"
+        // dialog every time. Not DO -> plain pinning (unchanged fallback).
+        KioskLock.applyDeviceOwnerLockdown(this, null);
         try {
             startLockTask();
         } catch (Exception ignored) {
