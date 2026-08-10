@@ -37,6 +37,7 @@
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <!-- Fully-style kiosk "special app access". These are user-toggled in
          Settings (OpenPanel deep-links each screen); declaring them makes the

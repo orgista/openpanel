@@ -13,8 +13,10 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.InstallSourceInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
@@ -33,8 +35,10 @@ import android.net.wifi.WifiManager;
 import android.net.wifi.WifiNetworkSuggestion;
 import android.os.BatteryManager;
 import android.os.Build;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.StatFs;
 import android.provider.Settings;
 import android.speech.RecognizerIntent;
 import android.text.Html;
@@ -101,6 +105,10 @@ public class SystemBridgePlugin extends Plugin {
     private static final String LOG_TAG = "OpenPanel";
     private static final String HOME_ALIAS_CLASS =
         "com.orgista.openpanel.OpenPanelHomeActivity";
+    private static final String DEVICE_HEALTH_PREFS = "openpanel.device_health.v1";
+    private static final String PREF_MANAGE_NOTIFICATIONS = "manage_notifications";
+    private static final String PREF_HIDDEN_PACKAGES = "hidden_packages";
+    private static final String PREF_NOTIFICATION_PACKAGES = "notification_packages";
 
     private BroadcastReceiver btScanReceiver;
     private BroadcastReceiver btStateReceiver;
@@ -754,6 +762,467 @@ public class SystemBridgePlugin extends Plugin {
             batteryReceiver = null;
         }
         ioExecutor.shutdownNow();
+    }
+
+    // ---------- Device Health + reversible debloating ----------
+
+    private SharedPreferences deviceHealthPrefs() {
+        return getContext().getSharedPreferences(DEVICE_HEALTH_PREFS, Context.MODE_PRIVATE);
+    }
+
+    private boolean isOpenPanelDeviceOwner() {
+        DevicePolicyManager policy = dpm();
+        return policy != null && policy.isDeviceOwnerApp(getContext().getPackageName());
+    }
+
+    private Set<String> readTrackedPackages(String key) {
+        return new HashSet<>(deviceHealthPrefs().getStringSet(key, Collections.emptySet()));
+    }
+
+    private void writeTrackedPackages(String key, Set<String> packages) {
+        deviceHealthPrefs().edit().putStringSet(key, new HashSet<>(packages)).apply();
+    }
+
+    private String detectedDebloatProfile() {
+        return DebloatCatalog.profileFor(Build.MANUFACTURER, Build.BRAND);
+    }
+
+    private ApplicationInfo findApplication(String packageName) {
+        try {
+            ApplicationInfo info = getContext().getPackageManager().getApplicationInfo(
+                packageName,
+                PackageManager.MATCH_DISABLED_COMPONENTS | PackageManager.MATCH_UNINSTALLED_PACKAGES
+            );
+            return (info.flags & ApplicationInfo.FLAG_INSTALLED) != 0 ? info : null;
+        } catch (PackageManager.NameNotFoundException ignored) {
+            return null;
+        }
+    }
+
+    private boolean isPackageHidden(String packageName) {
+        DevicePolicyManager policy = dpm();
+        if (policy == null || !isOpenPanelDeviceOwner()) return false;
+        try {
+            return policy.isApplicationHidden(
+                OpenPanelDeviceAdminReceiver.getComponentName(getContext()), packageName);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private boolean isSystemApplication(ApplicationInfo info) {
+        return info != null && (info.flags
+            & (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
+    }
+
+    private JSObject debloatAppJson(DebloatCatalog.Rule rule, Set<String> tracked) {
+        PackageManager packageManager = getContext().getPackageManager();
+        ApplicationInfo info = findApplication(rule.packageName);
+        if (info == null) return null;
+
+        boolean hidden = isPackageHidden(rule.packageName);
+        boolean managedByOpenPanel = tracked.contains(rule.packageName);
+        JSObject app = new JSObject();
+        app.put("packageName", rule.packageName);
+        app.put("label", rule.label);
+        app.put("installedLabel", packageManager.getApplicationLabel(info).toString());
+        app.put("category", rule.category);
+        app.put("reason", rule.reason);
+        app.put("profile", rule.profile);
+        app.put("isSystem", isSystemApplication(info));
+        app.put("enabled", info.enabled);
+        app.put("hidden", hidden);
+        app.put("managedByOpenPanel", managedByOpenPanel);
+        app.put("canUninstall", !isSystemApplication(info));
+        app.put("status", hidden
+            ? "hidden"
+            : (!info.enabled ? "disabled-externally" : "active"));
+        return app;
+    }
+
+    private JSArray installedDebloatApps() {
+        Set<String> tracked = readTrackedPackages(PREF_HIDDEN_PACKAGES);
+        JSArray apps = new JSArray();
+        for (DebloatCatalog.Rule rule : DebloatCatalog.rulesFor(
+                Build.MANUFACTURER, Build.BRAND)) {
+            JSObject app = debloatAppJson(rule, tracked);
+            if (app != null) apps.put(app);
+        }
+        return apps;
+    }
+
+    @PluginMethod
+    public void getDeviceHealth(PluginCall call) {
+        ioExecutor.execute(() -> {
+            ActivityManager activityManager = (ActivityManager) getContext()
+                .getSystemService(Context.ACTIVITY_SERVICE);
+            ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
+            if (activityManager != null) activityManager.getMemoryInfo(memory);
+            long usedRam = Math.max(0L, memory.totalMem - memory.availMem);
+
+            StatFs storage = new StatFs(Environment.getDataDirectory().getPath());
+            long totalStorage = storage.getTotalBytes();
+            long availableStorage = storage.getAvailableBytes();
+            long usedStorage = Math.max(0L, totalStorage - availableStorage);
+
+            int installedBloat = 0;
+            int activeBloat = 0;
+            int hiddenBloat = 0;
+            for (DebloatCatalog.Rule rule : DebloatCatalog.rulesFor(
+                    Build.MANUFACTURER, Build.BRAND)) {
+                ApplicationInfo info = findApplication(rule.packageName);
+                if (info == null) continue;
+                installedBloat++;
+                if (isPackageHidden(rule.packageName)) hiddenBloat++;
+                else if (info.enabled) activeBloat++;
+            }
+
+            DevicePolicyManager policy = dpm();
+            boolean deviceOwner = isOpenPanelDeviceOwner();
+            boolean arborXrManaged = policy != null && policy.isDeviceOwnerApp(ARBORXR_DPC);
+            JSObject result = new JSObject();
+            result.put("manufacturer", Build.MANUFACTURER);
+            result.put("brand", Build.BRAND);
+            result.put("model", Build.MODEL);
+            result.put("device", Build.DEVICE);
+            result.put("product", Build.PRODUCT);
+            result.put("androidVersion", Build.VERSION.RELEASE);
+            result.put("sdk", Build.VERSION.SDK_INT);
+            result.put("profile", detectedDebloatProfile());
+            result.put("ramTotalBytes", memory.totalMem);
+            result.put("ramAvailableBytes", memory.availMem);
+            result.put("ramUsedBytes", usedRam);
+            result.put("ramUsedPercent", memory.totalMem > 0
+                ? Math.round((usedRam * 100.0) / memory.totalMem) : 0);
+            result.put("storageTotalBytes", totalStorage);
+            result.put("storageAvailableBytes", availableStorage);
+            result.put("storageUsedBytes", usedStorage);
+            result.put("storageUsedPercent", totalStorage > 0
+                ? Math.round((usedStorage * 100.0) / totalStorage) : 0);
+            result.put("deviceOwner", deviceOwner);
+            result.put("arborXrManaged", arborXrManaged);
+            result.put("canManageApps", deviceOwner);
+            result.put("canManageNotifications",
+                deviceOwner && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU);
+            result.put("manageNotifications",
+                deviceHealthPrefs().getBoolean(PREF_MANAGE_NOTIFICATIONS, true));
+            result.put("installedBloatCount", installedBloat);
+            result.put("activeBloatCount", activeBloat);
+            result.put("hiddenBloatCount", hiddenBloat);
+            result.put("notificationManagedCount",
+                readTrackedPackages(PREF_NOTIFICATION_PACKAGES).size());
+            call.resolve(result);
+        });
+    }
+
+    @PluginMethod
+    public void getDebloatApps(PluginCall call) {
+        ioExecutor.execute(() -> {
+            JSObject result = new JSObject();
+            result.put("profile", detectedDebloatProfile());
+            result.put("apps", installedDebloatApps());
+            call.resolve(result);
+        });
+    }
+
+    private JSObject debloatCapabilityResult(boolean available, String message) {
+        JSObject result = new JSObject();
+        result.put("available", available);
+        result.put("deviceOwner", isOpenPanelDeviceOwner());
+        DevicePolicyManager policy = dpm();
+        result.put("arborXrManaged", policy != null && policy.isDeviceOwnerApp(ARBORXR_DPC));
+        result.put("message", message);
+        return result;
+    }
+
+    private boolean setPackageHiddenByOpenPanel(
+        String packageName,
+        boolean hidden,
+        Set<String> tracked
+    ) {
+        if (DebloatCatalog.isProtectedPackage(packageName)) return false;
+        DebloatCatalog.Rule rule = DebloatCatalog.findRule(
+            packageName, Build.MANUFACTURER, Build.BRAND);
+        if (rule == null || findApplication(packageName) == null) return false;
+        DevicePolicyManager policy = dpm();
+        if (policy == null || !isOpenPanelDeviceOwner()) return false;
+        try {
+            boolean changed = policy.setApplicationHidden(
+                OpenPanelDeviceAdminReceiver.getComponentName(getContext()), packageName, hidden);
+            if (changed || isPackageHidden(packageName) == hidden) {
+                if (hidden) tracked.add(packageName);
+                else tracked.remove(packageName);
+                return true;
+            }
+        } catch (RuntimeException error) {
+            Log.w(LOG_TAG, "Could not change package visibility for " + packageName, error);
+        }
+        return false;
+    }
+
+    @PluginMethod
+    public void applyRecommendedDebloat(PluginCall call) {
+        boolean manageNotifications = Boolean.TRUE.equals(
+            call.getBoolean("manageNotifications", Boolean.TRUE));
+        deviceHealthPrefs().edit()
+            .putBoolean(PREF_MANAGE_NOTIFICATIONS, manageNotifications)
+            .apply();
+        if (!isOpenPanelDeviceOwner()) {
+            call.resolve(debloatCapabilityResult(false,
+                "OpenPanel must be Device Owner to manage packages. ArborXR-managed devices must use an ArborXR policy."));
+            return;
+        }
+
+        ioExecutor.execute(() -> {
+            Set<String> tracked = readTrackedPackages(PREF_HIDDEN_PACKAGES);
+            int changed = 0;
+            int skipped = 0;
+            for (DebloatCatalog.Rule rule : DebloatCatalog.rulesFor(
+                    Build.MANUFACTURER, Build.BRAND)) {
+                ApplicationInfo info = findApplication(rule.packageName);
+                if (info == null || DebloatCatalog.isProtectedPackage(rule.packageName)) continue;
+                if (isPackageHidden(rule.packageName)) {
+                    skipped++;
+                    continue;
+                }
+                if (setPackageHiddenByOpenPanel(rule.packageName, true, tracked)) changed++;
+                else skipped++;
+            }
+            writeTrackedPackages(PREF_HIDDEN_PACKAGES, tracked);
+            JSObject notificationResult = applyNotificationPolicy(manageNotifications);
+            JSObject result = debloatCapabilityResult(true,
+                "Recommended apps were hidden reversibly.");
+            result.put("changed", changed);
+            result.put("skipped", skipped);
+            result.put("apps", installedDebloatApps());
+            result.put("notifications", notificationResult);
+            call.resolve(result);
+        });
+    }
+
+    @PluginMethod
+    public void setDebloatPackageState(PluginCall call) {
+        String packageName = call.getString("packageName");
+        boolean hidden = Boolean.TRUE.equals(call.getBoolean("hidden", Boolean.TRUE));
+        if (packageName == null || DebloatCatalog.findRule(
+                packageName, Build.MANUFACTURER, Build.BRAND) == null
+                || DebloatCatalog.isProtectedPackage(packageName)) {
+            call.reject("Package is not in the detected, reviewed debloat policy", "PACKAGE_NOT_ALLOWED");
+            return;
+        }
+        if (!isOpenPanelDeviceOwner()) {
+            call.resolve(debloatCapabilityResult(false,
+                "OpenPanel must be Device Owner to change package visibility."));
+            return;
+        }
+        ioExecutor.execute(() -> {
+            Set<String> tracked = readTrackedPackages(PREF_HIDDEN_PACKAGES);
+            boolean applied = setPackageHiddenByOpenPanel(packageName, hidden, tracked);
+            writeTrackedPackages(PREF_HIDDEN_PACKAGES, tracked);
+            JSObject result = debloatCapabilityResult(applied,
+                applied ? (hidden ? "App hidden." : "App restored.")
+                    : "Android did not apply the requested package change.");
+            DebloatCatalog.Rule rule = DebloatCatalog.findRule(
+                packageName, Build.MANUFACTURER, Build.BRAND);
+            result.put("app", rule == null ? JSONObject.NULL : debloatAppJson(rule, tracked));
+            call.resolve(result);
+        });
+    }
+
+    @PluginMethod
+    public void restoreDebloatApps(PluginCall call) {
+        if (!isOpenPanelDeviceOwner()) {
+            call.resolve(debloatCapabilityResult(false,
+                "OpenPanel must still be Device Owner to restore managed apps."));
+            return;
+        }
+        ioExecutor.execute(() -> {
+            Set<String> tracked = readTrackedPackages(PREF_HIDDEN_PACKAGES);
+            Set<String> remaining = new HashSet<>(tracked);
+            int restored = 0;
+            for (String packageName : new HashSet<>(tracked)) {
+                if (setPackageHiddenByOpenPanel(packageName, false, remaining)) restored++;
+            }
+            writeTrackedPackages(PREF_HIDDEN_PACKAGES, remaining);
+            JSObject result = debloatCapabilityResult(true,
+                "Apps hidden by OpenPanel were restored.");
+            result.put("restored", restored);
+            result.put("remaining", remaining.size());
+            result.put("apps", installedDebloatApps());
+            call.resolve(result);
+        });
+    }
+
+    private String resolvedHomePackage() {
+        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+        ResolveInfo resolved = getContext().getPackageManager()
+            .resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
+        return resolved != null && resolved.activityInfo != null
+            ? resolved.activityInfo.packageName : null;
+    }
+
+    private boolean isNotificationPolicyProtected(String packageName) {
+        if (packageName == null
+                || packageName.equals(getContext().getPackageName())
+                || packageName.equals(resolvedHomePackage())
+                || DebloatCatalog.isProtectedPackage(packageName)) {
+            return true;
+        }
+        ApplicationInfo info = findApplication(packageName);
+        if (info == null) return true;
+        // System apps can provide setup, documents, networking, telephony, and
+        // other critical surfaces whose notifications are operational rather
+        // than promotional. Only the reviewed consumer catalog is eligible
+        // when such an app happens to be preinstalled as a system package.
+        return isSystemApplication(info) && DebloatCatalog.findRule(
+            packageName, Build.MANUFACTURER, Build.BRAND) == null;
+    }
+
+    private boolean requestsPostNotifications(String packageName) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false;
+        try {
+            PackageInfo info = getContext().getPackageManager().getPackageInfo(
+                packageName, PackageManager.GET_PERMISSIONS);
+            if (info.requestedPermissions == null) return false;
+            for (String permission : info.requestedPermissions) {
+                if (Manifest.permission.POST_NOTIFICATIONS.equals(permission)) return true;
+            }
+        } catch (PackageManager.NameNotFoundException ignored) {}
+        return false;
+    }
+
+    private JSObject applyNotificationPolicy(boolean enabled) {
+        deviceHealthPrefs().edit().putBoolean(PREF_MANAGE_NOTIFICATIONS, enabled).apply();
+        JSObject result = debloatCapabilityResult(false,
+            "Notification management requires Android 13+ and OpenPanel Device Owner mode.");
+        result.put("enabled", enabled);
+        if (!isOpenPanelDeviceOwner() || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            result.put("changed", 0);
+            result.put("remaining", readTrackedPackages(PREF_NOTIFICATION_PACKAGES).size());
+            return result;
+        }
+
+        DevicePolicyManager policy = dpm();
+        PackageManager packageManager = getContext().getPackageManager();
+        ComponentName admin = OpenPanelDeviceAdminReceiver.getComponentName(getContext());
+        Set<String> tracked = readTrackedPackages(PREF_NOTIFICATION_PACKAGES);
+        int changed = 0;
+
+        if (enabled) {
+            // A policy update, launcher change, or OEM update can make a
+            // previously managed package protected. Restore it before applying
+            // the current policy so tracked permissions never get stranded.
+            for (String packageName : new HashSet<>(tracked)) {
+                if (findApplication(packageName) == null) {
+                    tracked.remove(packageName);
+                    continue;
+                }
+                if (!isNotificationPolicyProtected(packageName)) continue;
+                try {
+                    if (policy.setPermissionGrantState(admin, packageName,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                            DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED)) {
+                        tracked.remove(packageName);
+                        changed++;
+                    }
+                } catch (RuntimeException error) {
+                    Log.w(LOG_TAG, "Could not restore protected notifications for "
+                        + packageName, error);
+                }
+            }
+            for (ApplicationInfo info : packageManager.getInstalledApplications(
+                    PackageManager.MATCH_DISABLED_COMPONENTS)) {
+                String packageName = info.packageName;
+                if (isNotificationPolicyProtected(packageName)
+                        || !requestsPostNotifications(packageName)) continue;
+                try {
+                    if (packageManager.checkPermission(Manifest.permission.POST_NOTIFICATIONS,
+                            packageName) != PackageManager.PERMISSION_GRANTED) continue;
+                    if (policy.setPermissionGrantState(admin, packageName,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                            DevicePolicyManager.PERMISSION_GRANT_STATE_DENIED)) {
+                        tracked.add(packageName);
+                        changed++;
+                    }
+                } catch (RuntimeException error) {
+                    Log.w(LOG_TAG, "Could not suppress notifications for " + packageName, error);
+                }
+            }
+        } else {
+            for (String packageName : new HashSet<>(tracked)) {
+                if (findApplication(packageName) == null) {
+                    tracked.remove(packageName);
+                    continue;
+                }
+                try {
+                    if (policy.setPermissionGrantState(admin, packageName,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                            DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED)) {
+                        tracked.remove(packageName);
+                        changed++;
+                    }
+                } catch (RuntimeException error) {
+                    Log.w(LOG_TAG, "Could not restore notifications for " + packageName, error);
+                }
+            }
+        }
+
+        writeTrackedPackages(PREF_NOTIFICATION_PACKAGES, tracked);
+        result.put("available", true);
+        result.put("message", enabled
+            ? "Notifications were disabled for eligible apps."
+            : "Notification grants changed by OpenPanel were restored.");
+        result.put("changed", changed);
+        result.put("remaining", tracked.size());
+        return result;
+    }
+
+    @PluginMethod
+    public void setNotificationManagement(PluginCall call) {
+        boolean enabled = Boolean.TRUE.equals(call.getBoolean("enabled", Boolean.TRUE));
+        ioExecutor.execute(() -> call.resolve(applyNotificationPolicy(enabled)));
+    }
+
+    @PluginMethod
+    public void requestUninstallPackage(PluginCall call) {
+        String packageName = call.getString("packageName");
+        DebloatCatalog.Rule rule = DebloatCatalog.findRule(
+            packageName, Build.MANUFACTURER, Build.BRAND);
+        ApplicationInfo info = packageName == null ? null : findApplication(packageName);
+        if (rule == null || info == null || DebloatCatalog.isProtectedPackage(packageName)) {
+            call.reject("Package is not in the detected, reviewed debloat policy", "PACKAGE_NOT_ALLOWED");
+            return;
+        }
+        if (isSystemApplication(info)) {
+            call.reject("System apps can only be hidden and restored", "SYSTEM_APP");
+            return;
+        }
+        Set<String> tracked = readTrackedPackages(PREF_HIDDEN_PACKAGES);
+        if (tracked.contains(packageName) && isOpenPanelDeviceOwner()) {
+            setPackageHiddenByOpenPanel(packageName, false, tracked);
+            writeTrackedPackages(PREF_HIDDEN_PACKAGES, tracked);
+        }
+        Intent uninstall = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
+            Uri.parse("package:" + packageName));
+        uninstall.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+        try {
+            unpinIfPinned();
+            startActivityForResult(call, uninstall, "uninstallPackageResult");
+        } catch (RuntimeException error) {
+            call.reject("Could not open Android's uninstall confirmation",
+                "UNINSTALL_FAILED", error);
+        }
+    }
+
+    @ActivityCallback
+    private void uninstallPackageResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        String packageName = call.getString("packageName");
+        JSObject response = new JSObject();
+        response.put("packageName", packageName);
+        response.put("uninstalled", packageName != null && findApplication(packageName) == null);
+        response.put("resultCode", result.getResultCode());
+        call.resolve(response);
     }
 
     // ---------- Apps ----------

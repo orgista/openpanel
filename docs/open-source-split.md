@@ -1,8 +1,8 @@
-# Open-source split: public engine + private UI
+# Open-source split: engine + UI
 
-OpenPanel is **open-core**. The native kiosk engine and build tooling are public
-(this repo, **`orgista/openpanel`**); the polished React UI is kept in a separate
-**private** repo. There is a single app: the Capacitor app
+OpenPanel is MIT-licensed. The native kiosk engine/build tooling and React UI
+are versioned in separate repositories. The public CyberBanksy mirrors are
+**`cyberbanksy/openpanel`** and **`cyberbanksy/openpanel-ui`**. There is a single app: the Capacitor app
 `com.orgista.openpanel` (the legacy AOSP launcher and the ArborXR SDK were
 removed).
 
@@ -13,37 +13,35 @@ removed).
 | `android/` (Capacitor native, `SystemBridgePlugin`, `OpenPanelDeviceAdminReceiver`, manifest, gradle) | **public** `orgista/openpanel` | The kiosk engine + native bridge |
 | `scripts/`, `docs/`, build config (`package.json`, `vite.config.ts`, `capacitor.config.ts`, `tsconfig.json`, `index.html`, `postcss.config.mjs`) | **public** `orgista/openpanel` | The UI builds against these |
 | `.github/workflows/` | **public** `orgista/openpanel` | Engine CI plus protected full-release verification |
-| `src/` (entire React app + TS bridge bindings, styles, assets) | **private** `orgista/openpanel-ui` | The gated UI — **git-ignored here**, not in the public repo |
+| `src/` (entire React app + TS bridge bindings, styles, assets) | **public** `cyberbanksy/openpanel-ui` | MIT UI source — **git-ignored here** because it is a nested repository |
 
-The UI lives in the private repo **`orgista/openpanel-ui`** (its root maps 1:1
-onto `src/`) and is excluded here via `.gitignore` (`/src/`). To build the full
-app, clone it to `src/` (that keeps `vite`, `index.html` → `/src/main.tsx`, and
-`tsconfig` working unchanged). It can also be wired as a git submodule at
-`src/` — see below.
+The UI repo's root maps 1:1 onto `src/` and is excluded here via `.gitignore`
+(`/src/`). To build the full app, clone
+`https://github.com/cyberbanksy/openpanel-ui.git` to `src/`. That keeps `vite`,
+`index.html` → `/src/main.tsx`, and `tsconfig` working unchanged. It can also be
+wired as a git submodule at `src/`.
 
-## Wiring the private UI as a submodule (optional)
+## Wiring the UI as a submodule (optional)
 
-The private UI repo already exists and is pushed (in the local working tree,
+The UI repo exists independently (in the local working tree,
 `src/` is a nested git repo tracking it — push UI changes from there). To
 formalize it as a submodule of the public repo:
 
 ```sh
 # 1. Wire it in as a submodule at src/
 #    (first remove the /src/ ignore line from .gitignore)
-git submodule add git@github.com:orgista/openpanel-ui.git src
-git commit -am "build: add private UI submodule at src/"
+git submodule add https://github.com/cyberbanksy/openpanel-ui.git src
+git commit -am "build: add UI submodule at src/"
 git push
-
-# 2. Let CI read the private submodule
-gh secret set UI_SUBMODULE_TOKEN --repo orgista/openpanel   # PAT w/ read on openpanel-ui
 ```
 
-Clone for development (with UI access): `git clone --recurse-submodules <url>`.
-A contributor without UI access gets a buildable open engine but no bundled UI.
+Clone for development: `git clone --recurse-submodules <url>`. A public UI needs
+no checkout token. Keep `UI_SUBMODULE_TOKEN` only when a private upstream mirror
+is intentionally selected in CI.
 
 ## What is NOT published (git-ignored)
 
-`/src/` (private UI), keystores (`*.keystore`), `.env*`, `Samples/` (commercial
+`/src/` (separate UI checkout), keystores (`*.keystore`), `.env*`, `Samples/` (commercial
 Fully Kiosk APKs — do not redistribute), `*.apk` / `*.zip`, `dist/`, `build/`,
 `node_modules/`, `.toolchains/`, `local.properties`, `guidelines/` (design
 template), and `docs/_archive/` (retired internal/research notes).
@@ -54,8 +52,8 @@ must be empty.
 ## Release signing
 
 The checked-in `.github/workflows/android.yml` tests, lints, and assembles the
-public engine. `.github/workflows/release-verification.yml` checks out the
-private UI at the exact commit in the `OPENPANEL_UI_REF` repository variable,
+public engine. `.github/workflows/release-verification.yml` checks out the UI
+at the exact commit in the `OPENPANEL_UI_REF` repository variable,
 then verifies a complete signed release without publishing the APK. It requires
 `UI_SUBMODULE_TOKEN` plus these signing secrets:
 

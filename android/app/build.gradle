@@ -25,8 +25,8 @@ android {
         applicationId "com.orgista.openpanel"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 36
-        versionName "1.1.27"
+        versionCode 37
+        versionName "1.1.28"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders = [openPanelAppLabel: "OpenPanel"]
         aaptOptions {

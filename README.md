@@ -22,6 +22,13 @@ alongside **ArborXR** (companion mode) or on its own (standalone kiosk).
   controller in the Admin Panel, uses a keyboard-free remote PIN keypad, and
   delegates speech recognition to the system Google TV/Gboard experience
   without requesting microphone permission.
+- **Device Health:** detects the device manufacturer/model and Android version,
+  reports live RAM and storage use, and applies a conservative OEM-aware
+  debloat policy in standalone Device Owner mode. Package changes are hidden
+  reversibly and can be restored from the Admin Panel. Notification management
+  is enabled by default on Android 13+ and restores only grants previously
+  changed by OpenPanel. See
+  [`docs/device-health-debloater.md`](docs/device-health-debloater.md).
 - **Forward-compatible Android build:** no maximum Android version is declared;
   the stable Capacitor 8 toolchain currently compiles and targets API 36 and is
   designed for Android 17/API 37 runtime compatibility without adopting the
@@ -34,21 +41,22 @@ alongside **ArborXR** (companion mode) or on its own (standalone kiosk).
   - **Standalone** — OpenPanel becomes the HOME launcher and locks the device
     itself (device admin + lock task / screen pinning) for setups without ArborXR.
 
-## Open-core structure
+## Open-source structure
 
-This is an **open-core** project:
+OpenPanel is MIT-licensed and split into two source repositories so the native
+engine and launcher UI can be versioned independently:
 
 - **This repo (public)** — the engine: the Capacitor **native bridge**
   (`SystemBridgePlugin`: apps, Wi-Fi, Bluetooth, kiosk lock, device admin,
   ArborXR detection), the Android project (`android/`), build config, and CI.
-- **The React UI (private)** — the polished launcher UI is maintained in a
-  separate private repo and mounted at **`src/`** (git-ignored here). This repo
-  intentionally does **not** contain the UI. See
+- **The React UI (public MIT mirror)** — the polished launcher UI is maintained
+  separately at `cyberbanksy/openpanel-ui` and mounted at **`src/`**
+  (git-ignored here). See
   [`docs/open-source-split.md`](docs/open-source-split.md).
 
 ## Build
 
-The full APK build needs the private UI present at `src/`. With it in place:
+The full APK build needs the UI repository present at `src/`. With it in place:
 
 ```sh
 npm ci
@@ -65,7 +73,7 @@ to a real JDK 21 install before running Gradle locally.
 
 The engine CI (`.github/workflows/android.yml`) runs native tests, lint, debug
 assembly, and instrumentation-test compilation. The protected manual release
-verification workflow checks out an explicitly pinned private UI revision and
+verification workflow checks out an explicitly pinned UI revision and
 builds a signed APK with external signing inputs, then verifies its package,
 SDK range, TV eligibility, and exact production signing-certificate digest.
 `android/app/build.gradle` refuses release tasks unless
@@ -78,8 +86,8 @@ with missing signing inputs fails instead of falling through to an unsigned APK.
 
 ## Storage
 
-The canonical project—including the public engine and private `src/` UI
-repository—lives in this single NAS folder. OpenPanel's local Gradle helper uses
+The canonical project—including the engine and `src/` UI repository—lives in
+this single NAS folder. OpenPanel's local Gradle helper uses
 an automatically cleaned temporary cache because Gradle file locking is not
 supported by the SMB share. See [`docs/storage-layout.md`](docs/storage-layout.md)
 and run `npm run storage:audit` to verify the layout. Ignored private records,
@@ -101,6 +109,9 @@ unmanaged devices, use the standalone kiosk flow. See
 - App backup disabled; admin PIN / recovery stored as salted PBKDF2 verifiers
   with persistent lockout; privileged Wi-Fi/Bluetooth/settings actions are
   admin-gated.
+- Debloating uses reviewed exact package names with hard protections for core
+  Android, emergency, launcher, wallpaper, OTA, DPC/ArborXR, and OpenPanel
+  packages. There are no package-name wildcards and no self-ADB or root shell.
 
 ## License
 
