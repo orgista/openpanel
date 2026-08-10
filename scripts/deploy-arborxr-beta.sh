@@ -316,7 +316,7 @@ prepare_candidate() {
     upload_result="$(arborxr_cli apps upload \
       "$APP_ID" "$OPENPANEL_APK" \
       --version_number "$EXPECTED_VERSION" \
-      --notes 'Fixes standalone kiosk exit, validates PBS channel browsing/playback, and completes touch, keyboard, D-pad, and admin-screen QA.' \
+      --notes 'Adds reversible Device Health debloating, default notification management, wallpaper protections, reliable kiosk exit, and validated PBS/YouTube, touch, keyboard, D-pad, and admin flows.' \
       --wait --wait_time 600 \
       --release-channel-id "$DEBUG_CHANNEL_ID")"
     jq -e '.status == "available" or .id != null' <<<"$upload_result" >/dev/null

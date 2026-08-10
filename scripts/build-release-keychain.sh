@@ -7,8 +7,8 @@ KEY_ALIAS="openpanel-production-v2"
 KEYCHAIN_ACCOUNT="openpanel-production-v2"
 KEYCHAIN_SERVICE="OpenPanel production signing key v2"
 APK="$ROOT/android/app/build/outputs/apk/release/app-release.apk"
-EXPECTED_VERSION="1.1.27"
-EXPECTED_VERSION_CODE="36"
+EXPECTED_VERSION="1.1.28"
+EXPECTED_VERSION_CODE="37"
 
 [[ -f "$KEYSTORE" ]] || {
   echo "Missing production keystore: $KEYSTORE" >&2
