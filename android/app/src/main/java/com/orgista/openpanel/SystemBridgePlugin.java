@@ -99,6 +99,8 @@ public class SystemBridgePlugin extends Plugin {
     // ArborXR's MDM client is the Device Owner on managed devices.
     private static final String ARBORXR_DPC = "app.xrdm.client";
     private static final String LOG_TAG = "OpenPanel";
+    private static final String HOME_ALIAS_CLASS =
+        "com.orgista.openpanel.OpenPanelHomeActivity";
 
     private BroadcastReceiver btScanReceiver;
     private BroadcastReceiver btStateReceiver;
@@ -1579,6 +1581,44 @@ public class SystemBridgePlugin extends Plugin {
         }
     }
 
+    private ComponentName openPanelHomeAlias() {
+        return new ComponentName(getContext().getPackageName(), HOME_ALIAS_CLASS);
+    }
+
+    private void setOpenPanelHomeEnabled(boolean enabled) {
+        getContext().getPackageManager().setComponentEnabledSetting(
+            openPanelHomeAlias(),
+            enabled
+                ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+            PackageManager.DONT_KILL_APP
+        );
+    }
+
+    private ComponentName findSystemHomeComponent() {
+        PackageManager packageManager = getContext().getPackageManager();
+        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+        List<ResolveInfo> candidates = packageManager.queryIntentActivities(home, 0);
+        ComponentName fallback = null;
+
+        for (ResolveInfo candidate : candidates) {
+            if (candidate.activityInfo == null) continue;
+            String packageName = candidate.activityInfo.packageName;
+            if (getContext().getPackageName().equals(packageName)) continue;
+
+            ComponentName component = new ComponentName(
+                packageName, candidate.activityInfo.name);
+            if (!"com.android.settings".equals(packageName)) {
+                if ((candidate.activityInfo.applicationInfo.flags
+                        & ApplicationInfo.FLAG_SYSTEM) != 0) {
+                    return component;
+                }
+                if (fallback == null) fallback = component;
+            }
+        }
+        return fallback;
+    }
+
     @PluginMethod
     public void getKioskStatus(PluginCall call) {
         DevicePolicyManager dpm = dpm();
@@ -1656,6 +1696,9 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void openLauncherSettings(PluginCall call) {
+        // Exit Kiosk disables the HOME alias. Re-enable it before presenting
+        // the chooser so an operator can deliberately select OpenPanel again.
+        setOpenPanelHomeEnabled(true);
         Intent intent = new Intent(Settings.ACTION_HOME_SETTINGS);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         unpinIfPinned();
@@ -1678,6 +1721,7 @@ public class SystemBridgePlugin extends Plugin {
         final DevicePolicyManager dpm = dpm();
         final String pkg = getContext().getPackageName();
         final boolean deviceOwner = dpm != null && dpm.isDeviceOwnerApp(pkg);
+        setOpenPanelHomeEnabled(true);
 
         // As Device Owner, allowlist OpenPanel + the caller-supplied apps and hide
         // the status bar/notifications so startLockTask() below enters the strong,
@@ -1738,6 +1782,91 @@ public class SystemBridgePlugin extends Plugin {
                 } catch (Exception e) {
                     call.reject("Could not exit kiosk lock: " + e.getMessage(), "UNLOCK_FAILED");
                 }
+            }
+        });
+    }
+
+    /**
+     * Leave standalone kiosk mode and return directly to the device's built-in
+     * Home screen. Device Owner is intentionally retained; relinquishing it is
+     * irreversible and remains a separate authenticated admin action.
+     */
+    @PluginMethod
+    public void exitKioskToSystemHome(final PluginCall call) {
+        KioskState.setEnabled(getContext(), false);
+        KioskState.setKeyguardDisabled(getContext(), false);
+
+        getActivity().runOnUiThread(() -> {
+            DevicePolicyManager policy = dpm();
+            String packageName = getContext().getPackageName();
+            ComponentName systemHome = findSystemHomeComponent();
+
+            try {
+                if (lockTaskState() != ActivityManager.LOCK_TASK_MODE_NONE) {
+                    getActivity().stopLockTask();
+                }
+
+                if (policy != null && policy.isDeviceOwnerApp(packageName)) {
+                    ComponentName admin =
+                        OpenPanelDeviceAdminReceiver.getComponentName(getContext());
+                    try { policy.setStatusBarDisabled(admin, false); }
+                    catch (Exception error) {
+                        Log.w(LOG_TAG, "Could not restore status bar during kiosk exit", error);
+                    }
+                    try { policy.setKeyguardDisabled(admin, false); }
+                    catch (Exception error) {
+                        Log.w(LOG_TAG, "Could not restore keyguard during kiosk exit", error);
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        try {
+                            policy.setLockTaskFeatures(
+                                admin, DevicePolicyManager.LOCK_TASK_FEATURE_NONE);
+                        } catch (Exception error) {
+                            Log.w(LOG_TAG, "Could not clear lock-task features", error);
+                        }
+                    }
+                    try { policy.setLockTaskPackages(admin, new String[0]); }
+                    catch (Exception error) {
+                        Log.w(LOG_TAG, "Could not clear lock-task packages", error);
+                    }
+                }
+
+                // Removing only our HOME alias invalidates OpenPanel as the
+                // launcher without disabling its ordinary app entry point.
+                setOpenPanelHomeEnabled(false);
+
+                Intent home = new Intent(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_HOME)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                if (systemHome != null) home.setComponent(systemHome);
+
+                JSObject result = new JSObject();
+                result.put("exited", true);
+                result.put("launcherPackage",
+                    systemHome != null ? systemHome.getPackageName() : null);
+                result.put("deviceOwnerRetained",
+                    policy != null && policy.isDeviceOwnerApp(packageName));
+                call.resolve(result);
+
+                // Let Capacitor deliver the resolved Promise to the WebView
+                // before Home backgrounds it. The UI does not depend on the
+                // result, but callers and diagnostics should still settle.
+                mainHandler.postDelayed(() -> {
+                    try {
+                        getActivity().startActivity(home);
+                    } catch (Exception error) {
+                        Log.e(LOG_TAG, "Could not launch system Home after kiosk exit", error);
+                    }
+                }, 150);
+                Log.i(LOG_TAG, "Kiosk exit completed launcher="
+                    + (systemHome != null ? systemHome.flattenToShortString() : "implicit")
+                    + " lockTask=" + lockTaskModeName(lockTaskState()));
+            } catch (Exception error) {
+                Log.e(LOG_TAG, "Kiosk exit to system Home failed", error);
+                call.reject("Could not return to the system launcher: "
+                    + error.getMessage(), "EXIT_KIOSK_FAILED", error);
             }
         });
     }

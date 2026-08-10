@@ -25,9 +25,10 @@ android {
         applicationId "com.orgista.openpanel"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 8
-        versionName "1.0.7"
+        versionCode 36
+        versionName "1.1.27"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders = [openPanelAppLabel: "OpenPanel"]
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
@@ -45,6 +46,13 @@ android {
         }
     }
     buildTypes {
+        debug {
+            // Install beside the ArborXR production package during USB testing.
+            // This preserves the production signature, data, and launcher state.
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+            manifestPlaceholders.openPanelAppLabel = "OpenPanel Debug"
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
@@ -103,7 +111,7 @@ tasks.register("verifyOpenPanelReleaseSigning") {
 }
 
 tasks.matching { task ->
-    task.name in ["preReleaseBuild", "assembleRelease", "bundleRelease", "packageRelease"]
+    task.name in ["assembleRelease", "bundleRelease", "packageRelease", "signReleaseBundle"]
 }.configureEach {
     dependsOn tasks.named("verifyOpenPanelReleaseSigning")
 }
