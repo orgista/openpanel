@@ -100,6 +100,25 @@
             android:screenOrientation="landscape"
             android:theme="@style/AppTheme.Reader" />
 
+        <!-- Default handler for escaped web links. It intentionally has no
+             LAUNCHER category, so it never appears as an OpenPanel tile. -->
+        <activity
+            android:name=".SafeBrowserActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="OpenPanel Safe Browser"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:theme="@style/AppTheme.SafeBrowser">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+            </intent-filter>
+        </activity>
+
         <!-- Keep HOME on a separately-toggleable alias. Exit Kiosk disables
              only this alias, so Android can immediately fall back to the OEM
              launcher while OpenPanel remains available from the app drawer. -->
@@ -166,6 +185,10 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <meta-data
+            android:name="android.webkit.WebView.EnableSafeBrowsing"
+            android:value="true" />
     </application>
 
 </manifest>

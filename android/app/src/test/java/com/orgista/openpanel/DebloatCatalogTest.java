@@ -86,6 +86,23 @@ public class DebloatCatalogTest {
         assertTrue(packages.contains("com.amazon.wirelessmetrics.service"));
         assertTrue(packages.contains("com.audible.application.kindle"));
         assertTrue(packages.contains("com.kingsoft.office.amz"));
+        assertTrue(packages.contains("com.amazon.cloud9"));
+        assertTrue(packages.contains("com.amazon.cloud9.contentservice"));
+        assertTrue(packages.contains("com.android.gallery3d"));
+        assertTrue(packages.contains("com.android.camera2"));
+    }
+
+    @Test
+    public void genericChildKioskPolicyIncludesStockBrowsersAndMediaApps() {
+        List<DebloatCatalog.Rule> rules = DebloatCatalog.rulesFor("Google", "google");
+        Set<String> packages = new HashSet<>();
+        for (DebloatCatalog.Rule rule : rules) packages.add(rule.packageName);
+
+        assertTrue(packages.contains("com.android.chrome"));
+        assertTrue(packages.contains("org.mozilla.firefox"));
+        assertTrue(packages.contains("com.android.gallery3d"));
+        assertTrue(packages.contains("com.google.android.apps.photos"));
+        assertTrue(packages.contains("com.android.camera2"));
     }
 
     @Test

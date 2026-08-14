@@ -20,9 +20,16 @@ public class LaunchableAppCatalogTest {
     }
 
     @Test
-    public void hidesNovaRecoveryLauncherFromOpenPanelCatalog() {
+    public void hidesRecoveryLaunchersStoresBrowsersAndAdminUtilities() {
         assertFalse(LaunchableAppCatalog.isVisiblePackage("com.teslacoilsw.launcher"));
-        assertTrue(LaunchableAppCatalog.isVisiblePackage("org.fdroid.fdroid"));
+        assertFalse(LaunchableAppCatalog.isVisiblePackage("com.aurora.store"));
+        assertFalse(LaunchableAppCatalog.isVisiblePackage("org.fdroid.fdroid"));
+        assertFalse(LaunchableAppCatalog.isVisiblePackage("com.android.vending"));
+        assertFalse(LaunchableAppCatalog.isVisiblePackage("com.android.chrome"));
+        assertFalse(LaunchableAppCatalog.isVisiblePackage("org.mozilla.firefox"));
+        assertFalse(LaunchableAppCatalog.isVisiblePackage("dnsfilter.android"));
+        assertFalse(LaunchableAppCatalog.isVisiblePackage("moe.shizuku.privileged.api"));
+        assertTrue(LaunchableAppCatalog.isVisiblePackage("com.example.kids.game"));
     }
 
     @Test

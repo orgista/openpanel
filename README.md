@@ -57,6 +57,13 @@ alongside **ArborXR** (companion mode) or on its own (standalone kiosk).
   launcher and every Admin Panel tab are tested in reverse landscape at the
   device's 1024×552 usable app viewport. See
   [`docs/fire-tablet-support.md`](docs/fire-tablet-support.md).
+- **Child-safe app and web boundary:** storefronts, recovery launchers,
+  unrestricted browsers, and background admin utilities can stay installed but
+  never appear as child-facing launcher tiles. Escaped HTTP(S) links can be
+  assigned to OpenPanel's non-catalog Safe Browser, which permits only encrypted
+  `kiddle.co` pages and blocks navigation away from that domain. These rules are
+  shared by Fire, generic Android tablet, TV, and XR builds. See
+  [`docs/child-safe-browser.md`](docs/child-safe-browser.md).
 
 ## Open-source structure
 
