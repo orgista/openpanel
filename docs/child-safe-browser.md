@@ -56,9 +56,8 @@ default-app UI after opening an HTTP(S) link.
 
 ## Reversible device cleanup
 
-Device Owner deployments should use Admin Panel → Device Health so OpenPanel
-can hide and restore reviewed packages through Android policy. For an
-ADB-authorized Fire test tablet without Device Owner, exact packages may be
-disabled for user 0 with `pm disable-user --user 0 PACKAGE` and restored with
-`pm enable PACKAGE`. Never disable packages outside the reviewed catalog or the
-protected system boundary.
+Managed generic Android deployments should use Admin Panel → Device Health so
+OpenPanel can hide and restore reviewed packages through Android policy. On an
+ADB-authorized Fire tablet, exact packages may be disabled for user 0 with
+`pm disable-user --user 0 PACKAGE` and restored with `pm enable PACKAGE`. Never
+disable packages outside the reviewed catalog or the protected system boundary.

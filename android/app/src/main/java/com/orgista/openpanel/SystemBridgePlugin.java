@@ -185,6 +185,10 @@ public class SystemBridgePlugin extends Plugin {
         boolean hasLeanback = pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK);
         boolean isTelevision = uiModeType == Configuration.UI_MODE_TYPE_TELEVISION || hasLeanback;
         boolean hasTouchscreen = pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN);
+        boolean isFireOs = LandscapeOrientationLock.isFireDevice(
+            Build.MANUFACTURER,
+            Build.BRAND
+        );
         int smallestScreenWidthDp = configuration.smallestScreenWidthDp;
         String deviceType = DeviceProfileClassifier.deviceType(
             isTelevision,
@@ -233,6 +237,7 @@ public class SystemBridgePlugin extends Plugin {
         profile.put("isTelevision", isTelevision);
         profile.put("isTablet", "tablet".equals(deviceType));
         profile.put("isHandheld", "handheld".equals(deviceType));
+        profile.put("isFireOs", isFireOs);
         profile.put("hasLeanback", hasLeanback);
         profile.put("hasTouchscreen", hasTouchscreen);
         profile.put("hasDpad", hasDpad);
@@ -2328,7 +2333,11 @@ public class SystemBridgePlugin extends Plugin {
     @PluginMethod
     public void setManagementMode(PluginCall call) {
         String requestedMode = call.getString("mode", KioskState.MODE_COMPANION);
-        String mode = KioskState.normalizeMode(requestedMode);
+        boolean fireDevice = LandscapeOrientationLock.isFireDevice(
+            Build.MANUFACTURER,
+            Build.BRAND
+        );
+        String mode = KioskState.normalizeModeForDevice(requestedMode, fireDevice);
         boolean wasEnabled = KioskState.isEnabled(getContext());
         KioskState.setMode(getContext(), mode);
 
@@ -2406,11 +2415,22 @@ public class SystemBridgePlugin extends Plugin {
         final boolean deviceOwner = dpm != null && dpm.isDeviceOwnerApp(pkg);
         final boolean fireDevice = LandscapeOrientationLock.isFireDevice(
             Build.MANUFACTURER, Build.BRAND);
-        if (!KioskState.canReliablyStartLockTask(deviceOwner, fireDevice)) {
-            KioskState.setEnabled(getContext(), false);
-            call.reject(
-                "Fire OS does not provide reliable screen pinning to ordinary apps. OpenPanel's Home redirect remains active; Device Owner is required for full lock task.",
-                "FIRE_LOCK_REQUIRES_DEVICE_OWNER");
+        if (KioskState.shouldUseFireRedirectKiosk(deviceOwner, fireDevice)) {
+            setOpenPanelHomeEnabled(true);
+            if (!DeviceAccess.isAccessibilityServiceEnabled(getContext())) {
+                KioskState.setEnabled(getContext(), false);
+                call.reject(
+                    "Enable OpenPanel's accessibility service before starting the Fire kiosk.",
+                    "FIRE_KIOSK_NEEDS_ACCESSIBILITY"
+                );
+                return;
+            }
+            KioskState.setEnabled(getContext(), true);
+            JSObject result = new JSObject();
+            result.put("status", LauncherState.MODE_FIRE_REDIRECT);
+            result.put("deviceOwner", false);
+            result.put("allowlisted", false);
+            call.resolve(result);
             return;
         }
         setOpenPanelHomeEnabled(true);
@@ -2464,7 +2484,7 @@ public class SystemBridgePlugin extends Plugin {
         if (attemptsRemaining <= 0) {
             KioskState.setEnabled(getContext(), false);
             call.reject(
-                "Android did not enter screen pinning. Confirm the pinning prompt when shown; some Fire OS builds require Device Owner for full lock task.",
+                "Android did not enter screen pinning. Confirm the pinning prompt when shown.",
                 "LOCK_NOT_ACTIVE");
             return;
         }
@@ -2778,19 +2798,4 @@ public class SystemBridgePlugin extends Plugin {
         });
     }
 
-    // Data for an on-device Device-Owner provisioning QR (factory-reset flow):
-    // the admin component + this build's signing checksum. The operator supplies
-    // the hosted APK download URL; TS assembles the final QR JSON. Lets a fresh
-    // device be provisioned without adb — ArborXR-managed devices get their owner
-    // from ArborXR instead and never use this.
-    @PluginMethod
-    public void getProvisioningPayload(PluginCall call) {
-        Context ctx = getContext();
-        JSObject r = new JSObject();
-        r.put("packageName", ctx.getPackageName());
-        r.put("component",
-            OpenPanelDeviceAdminReceiver.getComponentName(ctx).flattenToString());
-        r.put("checksum", DeviceAccess.signingChecksum(ctx));
-        call.resolve(r);
-    }
 }

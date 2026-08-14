@@ -49,13 +49,19 @@ alongside **ArborXR** (companion mode) or on its own (standalone kiosk).
   [`docs/android-17-tv-readiness.md`](docs/android-17-tv-readiness.md).
 - **Two management modes**, auto-detected on first run:
   - **Companion** — ArborXR is the Device Owner and handles lockdown; OpenPanel is
-    the launcher UI. (Auto-selected when `app.xrdm.client` is the Device Owner.)
+    the launcher UI on compatible non-Fire devices. (Auto-selected when
+    `app.xrdm.client` is the Device Owner.)
   - **Standalone** — OpenPanel becomes the HOME launcher and locks the device
     itself (device admin + lock task / screen pinning) for setups without ArborXR.
+  - **Fire OS** — always uses standalone Home/accessibility redirection; ArborXR
+    and Device Owner enrollment are not offered in the Fire UI. Generic managed
+    provisioning instructions live in
+    [`docs/device-owner-provisioning.md`](docs/device-owner-provisioning.md).
 - **Verified Fire tablet profile:** Fire 7 (2022, 12th Generation), Amazon model
   `KFQUWI` / codename `quartz`, running Fire OS 8 (Android 11 / API 30). The
   launcher and every Admin Panel tab are tested in reverse landscape at the
-  device's 1024×552 usable app viewport. See
+  device's 1024×552 usable app viewport. Fire builds force the standalone
+  redirect kiosk and omit ArborXR/Device Owner setup. See
   [`docs/fire-tablet-support.md`](docs/fire-tablet-support.md).
 - **Child-safe app and web boundary:** storefronts, recovery launchers,
   unrestricted browsers, and background admin utilities can stay installed but
@@ -131,9 +137,11 @@ under `private/`; their legacy paths are compatibility symlinks.
 
 ## Deploy
 
-Upload the signed APK to **ArborXR** and assign it to a device/group. On
-ArborXR-managed devices OpenPanel runs in companion mode automatically; on
-unmanaged devices, use the standalone kiosk flow. See
+For compatible non-Fire devices, upload the signed APK to **ArborXR** and assign
+it to a device/group. On ArborXR-managed devices OpenPanel runs in companion
+mode automatically; on unmanaged devices, use the standalone kiosk flow. Fire
+tablets use the Fire standalone flow and are not ArborXR deployment targets in
+this project. See
 [`docs/arborxr-upload.md`](docs/arborxr-upload.md).
 
 

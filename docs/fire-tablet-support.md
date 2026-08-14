@@ -16,8 +16,8 @@ Android device, product, and build codename is `quartz`. See Amazon's
 | Physical display | 600×1024 at 160 dpi |
 | OpenPanel orientation | Reverse landscape (`user_rotation=3`) |
 | OpenPanel app viewport | 1024×552 after Fire OS's 48 px navigation inset |
-| Verified OpenPanel build | 1.1.31-debug, version code 40 |
-| Local artifact name | `openpanel-1.1.31-fire7-12thgen-kfquwi-debug.apk` |
+| Verified OpenPanel build | 1.1.35-debug, version code 44 |
+| Local artifact name | `openpanel-1.1.35-fire7-12thgen-kfquwi-debug.apk` |
 | Verification date | 2026-08-14 |
 
 ## UI verification
@@ -31,13 +31,19 @@ without moving the tab bar. The Settings admin footer remains fully visible.
 
 ## Fire OS management limits
 
-An already-configured Fire tablet cannot grant Device Owner to OpenPanel without
-a factory reset and first-run provisioning. On this profile OpenPanel therefore
-uses the supported best-effort controls available to a normal app: launcher/home
-redirection through accessibility, device admin where Fire OS permits it,
-notification-listener policy, system-UI protection, and Android screen pinning.
-The Admin Panel exposes Device Owner status instead of claiming a stronger lock
-than the operating system provides.
+The Fire profile always selects standalone mode and does not show ArborXR or
+Device Owner enrollment. OpenPanel uses the controls available to a normal Fire
+app: launcher/Home redirection through accessibility, device admin where Fire OS
+permits it, notification-listener policy, overlay and usage access, system-UI
+protection, and a foreground-return loop. Enabling **Fire kiosk** records this
+redirect kiosk state without triggering Fire OS's unreliable screen-pinning
+prompt.
+
+This is intentionally described as a Fire standalone kiosk rather than Android
+Device Owner. Managed Android provisioning remains available for compatible
+non-Fire devices and is documented separately in
+[`device-owner-provisioning.md`](device-owner-provisioning.md). The target tablet
+does not generate an enrollment QR that would disappear during a factory reset.
 
 Fire OS can reserve the bottom 48 px even when CSS reports the full 600 px
 physical height. Responsive modal rules must account for that inset; testing at
