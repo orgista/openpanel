@@ -5,6 +5,6 @@
     <string name="device_admin_label">OpenPanel Kiosk</string>
     <string name="device_admin_description">Lets OpenPanel lock this device into kiosk mode when you are not using ArborXR.</string>
     <string name="home_gesture_service_label">OpenPanel Home gesture</string>
-    <string name="home_gesture_accessibility_description">Swipe up from the bottom handle to return to OpenPanel. This service does not read screen content.</string>
+    <string name="home_gesture_accessibility_description">Keeps Home in OpenPanel and blocks the notification shade. It checks active window identity but does not read or store screen text.</string>
     <string name="home_gesture_handle_description">Swipe up to return to OpenPanel</string>
 </resources>

@@ -38,6 +38,7 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
 
     <!-- Fully-style kiosk "special app access". These are user-toggled in
          Settings (OpenPanel deep-links each screen); declaring them makes the
@@ -91,6 +92,14 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".LibraryReaderActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode|density"
+            android:exported="false"
+            android:label="Books &amp; Audio"
+            android:screenOrientation="landscape"
+            android:theme="@style/AppTheme.Reader" />
+
         <!-- Keep HOME on a separately-toggleable alias. Exit Kiosk disables
              only this alias, so Android can immediately fall back to the OEM
              launcher while OpenPanel remains available from the app drawer. -->
@@ -136,6 +145,16 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/home_gesture_accessibility_service" />
+        </service>
+
+        <service
+            android:name=".OpenPanelNotificationListenerService"
+            android:exported="true"
+            android:label="OpenPanel notification blocker"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
         <provider

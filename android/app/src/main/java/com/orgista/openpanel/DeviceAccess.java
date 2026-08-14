@@ -31,12 +31,24 @@ final class DeviceAccess {
 
     static boolean isAccessibilityServiceEnabled(Context context) {
         ComponentName service = new ComponentName(context, HomeGestureAccessibilityService.class);
-        String enabled = Settings.Secure.getString(
-            context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+        return secureComponentListContains(context,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, service);
+    }
+
+    static boolean isNotificationListenerEnabled(Context context) {
+        ComponentName service = new ComponentName(
+            context, OpenPanelNotificationListenerService.class);
+        return secureComponentListContains(context,
+            "enabled_notification_listeners", service);
+    }
+
+    private static boolean secureComponentListContains(
+            Context context, String setting, ComponentName component) {
+        String enabled = Settings.Secure.getString(context.getContentResolver(), setting);
         if (enabled == null || enabled.isEmpty()) return false;
         TextUtils.SimpleStringSplitter splitter = new TextUtils.SimpleStringSplitter(':');
         splitter.setString(enabled);
-        String flat = service.flattenToString();
+        String flat = component.flattenToString();
         while (splitter.hasNext()) {
             if (flat.equalsIgnoreCase(splitter.next())) return true;
         }

@@ -3,6 +3,7 @@
 A managed **kiosk launcher** for Android tablets, Google TV, and XR headsets
 (Meta Quest, Pico, Vive Focus, Lenovo, …). One adaptive app presents an approved
 catalog of apps and approved YouTube videos, channels, and playlists, and
+an offline books/audiobooks shelf with standards-based institutional catalogs,
 confines the device — either
 alongside **ArborXR** (companion mode) or on its own (standalone kiosk).
 
@@ -29,6 +30,17 @@ alongside **ArborXR** (companion mode) or on its own (standalone kiosk).
   is enabled by default on Android 13+ and restores only grants previously
   changed by OpenPanel. See
   [`docs/device-health-debloater.md`](docs/device-health-debloater.md).
+- **TV DNS & telemetry status:** the TV-only Device Health view detects
+  personalDNSfilter, its active VPN owner, always-on/lockdown state, and Android
+  Private DNS conflicts. Standalone Device Owner installations can keep the
+  filter always-on without risking a network-lockdown outage; ArborXR-managed
+  TVs remain report-only. See [`docs/tv-dns-filter.md`](docs/tv-dns-filter.md).
+- **Books & Audio:** imports EPUB, PDF, Readium audiobook, MP3, and AAC files;
+  reads OPDS 1.2/2.0 catalogs without WebView CORS restrictions; stores
+  publications privately for offline use; and resumes reading/listening with
+  Readium navigators. Project Gutenberg is included as an open-access catalog.
+  Licensed lending systems still require the institution's authorized
+  authentication/DRM connector. See [`docs/library-opds-readium.md`](docs/library-opds-readium.md).
 - **Forward-compatible Android build:** no maximum Android version is declared;
   the stable Capacitor 8 toolchain currently compiles and targets API 36 and is
   designed for Android 17/API 37 runtime compatibility without adopting the
@@ -40,6 +52,11 @@ alongside **ArborXR** (companion mode) or on its own (standalone kiosk).
     the launcher UI. (Auto-selected when `app.xrdm.client` is the Device Owner.)
   - **Standalone** — OpenPanel becomes the HOME launcher and locks the device
     itself (device admin + lock task / screen pinning) for setups without ArborXR.
+- **Verified Fire tablet profile:** Fire 7 (2022, 12th Generation), Amazon model
+  `KFQUWI` / codename `quartz`, running Fire OS 8 (Android 11 / API 30). The
+  launcher and every Admin Panel tab are tested in reverse landscape at the
+  device's 1024×552 usable app viewport. See
+  [`docs/fire-tablet-support.md`](docs/fire-tablet-support.md).
 
 ## Open-source structure
 
@@ -48,7 +65,8 @@ engine and launcher UI can be versioned independently:
 
 - **This repo (public)** — the engine: the Capacitor **native bridge**
   (`SystemBridgePlugin`: apps, Wi-Fi, Bluetooth, kiosk lock, device admin,
-  ArborXR detection), the Android project (`android/`), build config, and CI.
+  ArborXR detection; `LibraryBridgePlugin`: OPDS, downloads, and local imports),
+  the Android project (`android/`), build config, and CI.
 - **The React UI (public MIT mirror)** — the polished launcher UI is maintained
   separately at `cyberbanksy/openpanel-ui` and mounted at **`src/`**
   (git-ignored here). See
@@ -83,6 +101,16 @@ manager.
 
 The signing preflight is wired into APK/bundle packaging tasks. A release build
 with missing signing inputs fails instead of falling through to an unsigned APK.
+
+### Verified Fire build
+
+| OpenPanel | Fire tablet | Fire OS / Android | Orientation and usable viewport | Local debug artifact |
+| --- | --- | --- | --- | --- |
+| 1.1.31 (40) | Fire 7 (2022, 12th Gen), `KFQUWI` / `quartz` | Fire OS 8, Android 11 (API 30), build `RS8338.3339N` | Reverse landscape, 1024×552 | `openpanel-1.1.31-fire7-12thgen-kfquwi-debug.apk` |
+
+APK files stay ignored and are not committed to source control. Release APKs
+must be reproduced by the signed release workflow. The local debug artifact is
+only an installation/test result for the authorized physical tablet.
 
 ## Storage
 

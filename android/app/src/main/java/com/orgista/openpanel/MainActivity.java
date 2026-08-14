@@ -33,6 +33,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(SystemBridgePlugin.class);
+        registerPlugin(LibraryBridgePlugin.class);
         super.onCreate(savedInstanceState);
         logLifecycle("created");
         installRemoteBackHandler();

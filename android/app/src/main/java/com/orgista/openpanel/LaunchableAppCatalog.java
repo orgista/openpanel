@@ -10,6 +10,8 @@ import java.util.List;
 
 /** Finds launchable apps across both touch-device and Android TV launchers. */
 final class LaunchableAppCatalog {
+    private static final String NOVA_LAUNCHER_PACKAGE = "com.teslacoilsw.launcher";
+
     private LaunchableAppCatalog() {}
 
     static List<String> categories() {
@@ -25,5 +27,17 @@ final class LaunchableAppCatalog {
             if (matches != null) activities.addAll(matches);
         }
         return activities;
+    }
+
+    /**
+     * Recovery launchers may remain installed on constrained Fire OS devices, but should not
+     * appear as child-facing apps inside OpenPanel.
+     */
+    static boolean isVisiblePackage(String packageName) {
+        return packageName != null
+            && !NOVA_LAUNCHER_PACKAGE.equals(packageName)
+            && !packageName.startsWith("amazon.")
+            && !packageName.startsWith("com.amazon.")
+            && !packageName.startsWith("com.fireos.");
     }
 }

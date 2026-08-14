@@ -1092,10 +1092,19 @@ public class SystemBridgePlugin extends Plugin {
     }
 
     private JSObject applyNotificationPolicy(boolean enabled) {
-        deviceHealthPrefs().edit().putBoolean(PREF_MANAGE_NOTIFICATIONS, enabled).apply();
-        JSObject result = debloatCapabilityResult(false,
-            "Notification management requires Android 13+ and OpenPanel Device Owner mode.");
+        NotificationBlockPolicy.setEnabled(getContext(), enabled);
+        boolean notificationAccess = DeviceAccess.isNotificationListenerEnabled(getContext());
+        if (enabled && notificationAccess) {
+            OpenPanelNotificationListenerService.applyNow();
+        }
+        JSObject result = debloatCapabilityResult(notificationAccess,
+            enabled
+                ? (notificationAccess
+                    ? "Nonessential notifications are blocked."
+                    : "Grant Notification Access to block nonessential notifications on this device.")
+                : "OpenPanel notification blocking is off.");
         result.put("enabled", enabled);
+        result.put("notificationAccess", notificationAccess);
         if (!isOpenPanelDeviceOwner() || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             result.put("changed", 0);
             result.put("remaining", readTrackedPackages(PREF_NOTIFICATION_PACKAGES).size());
@@ -1225,6 +1234,191 @@ public class SystemBridgePlugin extends Plugin {
         call.resolve(response);
     }
 
+    // ---------- TV DNS + network privacy ----------
+
+    private String alwaysOnVpnPackage() {
+        DevicePolicyManager policy = dpm();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
+                && policy != null && isOpenPanelDeviceOwner()) {
+            try {
+                String managed = policy.getAlwaysOnVpnPackage(
+                    OpenPanelDeviceAdminReceiver.getComponentName(getContext()));
+                if (managed != null && !managed.trim().isEmpty()) return managed;
+            } catch (RuntimeException ignored) {}
+        }
+        try {
+            String configured = Settings.Secure.getString(
+                getContext().getContentResolver(), "always_on_vpn_app");
+            return configured == null || configured.trim().isEmpty() ? null : configured;
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private boolean isVpnLockdownEnabled() {
+        DevicePolicyManager policy = dpm();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                && policy != null && isOpenPanelDeviceOwner()) {
+            try {
+                return policy.isAlwaysOnVpnLockdownEnabled(
+                    OpenPanelDeviceAdminReceiver.getComponentName(getContext()));
+            } catch (RuntimeException ignored) {}
+        }
+        try {
+            return Settings.Secure.getInt(
+                getContext().getContentResolver(), "always_on_vpn_lockdown", 0) == 1;
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private JSObject readDnsFilterStatus() {
+        PackageManager packageManager = getContext().getPackageManager();
+        ApplicationInfo filterInfo = findApplication(NetworkPrivacyState.DNS_FILTER_PACKAGE);
+        boolean installed = filterInfo != null;
+        boolean enabled = installed && filterInfo.enabled;
+        int filterUid = installed ? filterInfo.uid : -1;
+        boolean vpnActive = false;
+        boolean vpnOwnedByFilter = false;
+        ConnectivityManager connectivity = (ConnectivityManager) getContext()
+            .getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivity != null) {
+            try {
+                for (Network network : connectivity.getAllNetworks()) {
+                    NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
+                    if (capabilities == null
+                            || !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                        continue;
+                    }
+                    vpnActive = true;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                            && capabilities.getOwnerUid() == filterUid) {
+                        vpnOwnedByFilter = true;
+                    }
+                }
+            } catch (RuntimeException error) {
+                Log.w(LOG_TAG, "Could not inspect VPN networks", error);
+            }
+        }
+
+        String alwaysOnPackage = alwaysOnVpnPackage();
+        boolean alwaysOn = NetworkPrivacyState.DNS_FILTER_PACKAGE.equals(alwaysOnPackage);
+        vpnOwnedByFilter = NetworkPrivacyState.isVpnOwnedByFilter(
+            vpnActive, vpnOwnedByFilter, alwaysOn);
+        boolean filterActive = NetworkPrivacyState.isFilterActive(
+            installed, enabled, vpnOwnedByFilter);
+        String privateDnsMode = NetworkPrivacyState.normalizePrivateDnsMode(
+            Settings.Global.getString(getContext().getContentResolver(), "private_dns_mode"));
+        String privateDnsHost = Settings.Global.getString(
+            getContext().getContentResolver(), "private_dns_specifier");
+        if (privateDnsHost != null && privateDnsHost.trim().isEmpty()) privateDnsHost = null;
+
+        String versionName = null;
+        if (installed) {
+            try {
+                PackageInfo packageInfo = packageManager.getPackageInfo(
+                    NetworkPrivacyState.DNS_FILTER_PACKAGE, 0);
+                versionName = packageInfo.versionName;
+            } catch (PackageManager.NameNotFoundException ignored) {}
+        }
+
+        JSObject result = new JSObject();
+        result.put("filterPackage", NetworkPrivacyState.DNS_FILTER_PACKAGE);
+        result.put("versionName", versionName == null ? JSONObject.NULL : versionName);
+        result.put("installed", installed);
+        result.put("enabled", enabled);
+        result.put("vpnActive", vpnActive);
+        result.put("filterActive", filterActive);
+        result.put("alwaysOn", alwaysOn);
+        result.put("lockdown", alwaysOn && isVpnLockdownEnabled());
+        result.put("privateDnsMode", privateDnsMode);
+        result.put("privateDnsHost",
+            privateDnsHost == null ? JSONObject.NULL : privateDnsHost);
+        result.put("privateDnsMayBypassFilter",
+            NetworkPrivacyState.privateDnsMayBypassFilter(filterActive, privateDnsMode));
+        result.put("canManageAlwaysOn",
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isOpenPanelDeviceOwner());
+        DevicePolicyManager policy = dpm();
+        result.put("arborXrManaged",
+            policy != null && policy.isDeviceOwnerApp(ARBORXR_DPC));
+        return result;
+    }
+
+    @PluginMethod
+    public void getDnsFilterStatus(PluginCall call) {
+        ioExecutor.execute(() -> call.resolve(readDnsFilterStatus()));
+    }
+
+    @PluginMethod
+    public void setDnsFilterAlwaysOn(PluginCall call) {
+        boolean enabled = Boolean.TRUE.equals(call.getBoolean("enabled", Boolean.TRUE));
+        DevicePolicyManager policy = dpm();
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            call.reject("Always-on VPN requires Android 7 or newer", "VPN_UNSUPPORTED");
+            return;
+        }
+        if (policy == null || !isOpenPanelDeviceOwner()) {
+            call.reject(
+                "OpenPanel must be Device Owner to manage always-on VPN. Use the TV VPN settings or the active MDM policy.",
+                "NOT_DEVICE_OWNER");
+            return;
+        }
+        if (enabled && findApplication(NetworkPrivacyState.DNS_FILTER_PACKAGE) == null) {
+            call.reject("personalDNSfilter is not installed", "DNS_FILTER_NOT_INSTALLED");
+            return;
+        }
+        ComponentName admin = OpenPanelDeviceAdminReceiver.getComponentName(getContext());
+        try {
+            // Do not enable lockdown here. A resolver or blocklist mistake must
+            // not strand a TV offline; an MDM can deliberately add lockdown.
+            policy.setAlwaysOnVpnPackage(
+                admin,
+                enabled ? NetworkPrivacyState.DNS_FILTER_PACKAGE : null,
+                false);
+            call.resolve(readDnsFilterStatus());
+        } catch (PackageManager.NameNotFoundException error) {
+            call.reject("This personalDNSfilter build does not support always-on VPN",
+                "ALWAYS_ON_UNSUPPORTED", error);
+        } catch (RuntimeException error) {
+            call.reject("Android could not change always-on DNS filtering: "
+                + error.getMessage(), "ALWAYS_ON_FAILED", error);
+        }
+    }
+
+    @PluginMethod
+    public void openDnsFilter(PluginCall call) {
+        Intent intent = getContext().getPackageManager().getLaunchIntentForPackage(
+            NetworkPrivacyState.DNS_FILTER_PACKAGE);
+        if (intent == null) {
+            call.reject("personalDNSfilter is not installed", "DNS_FILTER_NOT_INSTALLED");
+            return;
+        }
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            unpinIfPinned();
+            getContext().startActivity(intent);
+            call.resolve();
+        } catch (RuntimeException error) {
+            call.reject("Could not open personalDNSfilter", "DNS_FILTER_LAUNCH_FAILED", error);
+        }
+    }
+
+    @PluginMethod
+    public void openVpnSettings(PluginCall call) {
+        launchSettings(call, new Intent(Settings.ACTION_VPN_SETTINGS));
+    }
+
+    @PluginMethod
+    public void openPrivateDnsSettings(PluginCall call) {
+        Intent intent = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+            ? new Intent("android.settings.PRIVATE_DNS_SETTINGS")
+            : new Intent(Settings.ACTION_WIRELESS_SETTINGS);
+        if (intent.resolveActivity(getContext().getPackageManager()) == null) {
+            intent = new Intent(Settings.ACTION_WIRELESS_SETTINGS);
+        }
+        launchSettings(call, intent);
+    }
+
     // ---------- Apps ----------
 
     @PluginMethod
@@ -1239,7 +1433,9 @@ public class SystemBridgePlugin extends Plugin {
 
         for (ResolveInfo ri : activities) {
             String pkg = ri.activityInfo.packageName;
-            if (pkg.equals(self) || !seen.add(pkg)) continue;
+            if (pkg.equals(self)
+                || !LaunchableAppCatalog.isVisiblePackage(pkg)
+                || !seen.add(pkg)) continue;
 
             try {
                 ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
@@ -2018,11 +2214,28 @@ public class SystemBridgePlugin extends Plugin {
     }
 
     private boolean isDefaultLauncher() {
-        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
-        ResolveInfo res = getContext().getPackageManager()
-                .resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
-        return res != null && res.activityInfo != null
-                && getContext().getPackageName().equals(res.activityInfo.packageName);
+        return LauncherState.isDefaultLauncher(
+            getContext().getPackageName(),
+            resolvedHomePackage()
+        );
+    }
+
+    private String homeControlMode() {
+        return LauncherState.homeControlMode(
+            getContext().getPackageName(),
+            resolvedHomePackage(),
+            KioskState.getMode(getContext()),
+            isOpenPanelHomeEnabled(),
+            DeviceAccess.isAccessibilityServiceEnabled(getContext())
+        );
+    }
+
+    private boolean isOpenPanelHomeEnabled() {
+        int state = getContext().getPackageManager()
+            .getComponentEnabledSetting(openPanelHomeAlias());
+        return state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+            && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+            && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED;
     }
 
     private int lockTaskState() {
@@ -2104,6 +2317,7 @@ public class SystemBridgePlugin extends Plugin {
         ret.put("deviceAdmin", deviceAdmin);
         ret.put("arborXrManaged", arborXrManaged);
         ret.put("defaultLauncher", isDefaultLauncher());
+        ret.put("homeControlMode", homeControlMode());
         ret.put("lockTaskActive", state != ActivityManager.LOCK_TASK_MODE_NONE);
         ret.put("lockTaskMode", lockTaskModeName(state));
         ret.put("managementMode", KioskState.getMode(getContext()));
@@ -2190,6 +2404,15 @@ public class SystemBridgePlugin extends Plugin {
         final DevicePolicyManager dpm = dpm();
         final String pkg = getContext().getPackageName();
         final boolean deviceOwner = dpm != null && dpm.isDeviceOwnerApp(pkg);
+        final boolean fireDevice = LandscapeOrientationLock.isFireDevice(
+            Build.MANUFACTURER, Build.BRAND);
+        if (!KioskState.canReliablyStartLockTask(deviceOwner, fireDevice)) {
+            KioskState.setEnabled(getContext(), false);
+            call.reject(
+                "Fire OS does not provide reliable screen pinning to ordinary apps. OpenPanel's Home redirect remains active; Device Owner is required for full lock task.",
+                "FIRE_LOCK_REQUIRES_DEVICE_OWNER");
+            return;
+        }
         setOpenPanelHomeEnabled(true);
 
         // As Device Owner, allowlist OpenPanel + the caller-supplied apps and hide
@@ -2215,17 +2438,39 @@ public class SystemBridgePlugin extends Plugin {
             public void run() {
                 try {
                     getActivity().startLockTask();
-                    JSObject ret = new JSObject();
-                    ret.put("status", lockTaskModeName(lockTaskState()));
-                    ret.put("deviceOwner", deviceOwner);
-                    ret.put("allowlisted", strongLock);
-                    call.resolve(ret);
+                    waitForKioskStart(call, deviceOwner, strongLock, 20);
                 } catch (Exception e) {
                     KioskState.setEnabled(getContext(), false);
                     call.reject("Could not enter kiosk lock: " + e.getMessage(), "LOCK_FAILED");
                 }
             }
         });
+    }
+
+    private void waitForKioskStart(
+            final PluginCall call,
+            final boolean deviceOwner,
+            final boolean allowlisted,
+            final int attemptsRemaining) {
+        int state = lockTaskState();
+        if (KioskState.isLockTaskActive(state)) {
+            JSObject ret = new JSObject();
+            ret.put("status", lockTaskModeName(state));
+            ret.put("deviceOwner", deviceOwner);
+            ret.put("allowlisted", allowlisted);
+            call.resolve(ret);
+            return;
+        }
+        if (attemptsRemaining <= 0) {
+            KioskState.setEnabled(getContext(), false);
+            call.reject(
+                "Android did not enter screen pinning. Confirm the pinning prompt when shown; some Fire OS builds require Device Owner for full lock task.",
+                "LOCK_NOT_ACTIVE");
+            return;
+        }
+        mainHandler.postDelayed(
+            () -> waitForKioskStart(call, deviceOwner, allowlisted, attemptsRemaining - 1),
+            500L);
     }
 
     @PluginMethod
@@ -2394,9 +2639,11 @@ public class SystemBridgePlugin extends Plugin {
         r.put("deviceAdmin", dpm != null
             && dpm.isAdminActive(OpenPanelDeviceAdminReceiver.getComponentName(ctx)));
         r.put("defaultLauncher", isDefaultLauncher());
+        r.put("homeControlMode", homeControlMode());
         r.put("location", getPermissionState("location") == PermissionState.GRANTED);
         r.put("bluetooth", hasBtPermissions());
         r.put("accessibility", DeviceAccess.isAccessibilityServiceEnabled(ctx));
+        r.put("notificationAccess", DeviceAccess.isNotificationListenerEnabled(ctx));
         r.put("overlay", DeviceAccess.canDrawOverlays(ctx));
         r.put("usageAccess", DeviceAccess.hasUsageAccess(ctx));
         r.put("writeSettings", DeviceAccess.canWriteSettings(ctx));
@@ -2472,6 +2719,11 @@ public class SystemBridgePlugin extends Plugin {
     @PluginMethod
     public void openAccessibilitySettings(PluginCall call) {
         launchSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+    }
+
+    @PluginMethod
+    public void openNotificationListenerSettings(PluginCall call) {
+        launchSettings(call, new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
     }
 
     @PluginMethod

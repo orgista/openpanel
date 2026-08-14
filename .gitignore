@@ -24,7 +24,8 @@ Samples/
 *.zip
 
 # --- Dependencies / toolchains ---
-node_modules/
+/node_modules
+.node_modules.interrupted-openpanel-library/
 .npm-cache/
 .gradle-home/
 .gradle-project-cache/

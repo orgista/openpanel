@@ -50,6 +50,21 @@ public final class DebloatCatalog {
         rule("com.google.android.apps.youtube.music", "YouTube Music", "media", "Optional consumer music app", "generic"),
         rule("com.google.android.feedback", "Google Feedback", "telemetry", "Optional feedback and diagnostics uploader", "generic"),
         rule("com.google.android.gms.location.history", "Google Location History", "telemetry", "Optional location-history service", "generic"),
+        rule("com.google.android.tv.bugreportsender", "Android TV Bug Reports", "telemetry", "Optional TV bug-report uploader", "generic"),
+        rule("com.google.android.tvrecommendations", "Google TV Recommendations", "promotions", "Consumer home-screen recommendations", "generic"),
+        rule("com.google.android.leanbacklauncher.recommendations", "Android TV Recommendations", "promotions", "Legacy home-screen recommendations", "generic"),
+        rule("com.google.android.youtube.tv", "YouTube for Android TV", "media", "OpenPanel provides its own restricted YouTube player", "generic"),
+        rule("com.google.android.youtube.tvmusic", "YouTube Music for Android TV", "media", "Optional unrestricted music app", "generic"),
+
+        // TCL Android / Google TV consumer extras. TV input, remote, Settings,
+        // WebView, OTA, and both fallback launchers stay protected below.
+        rule("com.tcl.appmarket2", "TCL App Store", "promotions", "Optional OEM app storefront", "tcl"),
+        rule("com.tcl.bi", "TCL Usage Analytics", "telemetry", "Optional OEM usage analytics service", "tcl"),
+        rule("com.tcl.bootadservice", "TCL Boot Ads", "promotions", "Boot advertising service", "tcl"),
+        rule("com.tcl.esticker", "TCL E-Sticker", "promotions", "Retail and promotional overlay", "tcl"),
+        rule("com.tcl.showmode", "TCL Show Mode", "promotions", "Retail demonstration mode", "tcl"),
+        rule("com.tcl.usercenter", "TCL User Center", "promotions", "Optional consumer account hub", "tcl"),
+        rule("com.tcl.waterfall.overseas", "TCL Content Waterfall", "promotions", "OEM content recommendation surface", "tcl"),
 
         // Lenovo / Motorola-family packages.
         rule("com.lenovo.hec.lenovoextend", "Lenovo FreeStyle", "oem", "Optional cross-device companion", "lenovo"),
@@ -91,14 +106,39 @@ public final class DebloatCatalog {
         rule("com.huawei.videoeditor", "Huawei Video Editor", "media", "Optional video editor", "huawei"),
         rule("com.huawei.tips", "Huawei Tips", "support", "Optional tips app", "huawei"),
 
-        // Amazon Fire OS consumer apps. Core launcher, settings, Appstore, and DPC stay protected.
+        // Amazon Fire OS consumer apps. Core launcher, settings, Appstore, WebView,
+        // OTA/setup, and the Amazon parental-control DPC stay protected below.
+        // The extended entries mirror the conservative, reversible subset
+        // validated on Fire OS 8; low-level identity, sync, security, and
+        // connectivity packages are intentionally excluded.
+        rule("com.amazon.afe.app", "Tap to Alexa", "assistant", "Optional Alexa touch interface", "amazon"),
+        rule("com.amazon.avod", "Prime Video", "media", "Optional video streaming app", "amazon"),
+        rule("com.amazon.cloud9.kids", "Amazon Kids Web Browser", "kids", "Optional kids browser", "amazon"),
+        rule("com.amazon.comms.kids", "Alexa Communication for Kids", "kids", "Optional kids communication app", "amazon"),
+        rule("com.amazon.dee.alexaonandroidos", "Alexa on Fire OS", "assistant", "Optional Alexa integration", "amazon"),
+        rule("com.amazon.dee.app", "Alexa", "assistant", "Optional voice assistant app", "amazon"),
+        rule("com.amazon.firespotlight", "Amazon Appstore Spotlight", "promotions", "App recommendations and promotions", "amazon"),
+        rule("com.amazon.h2settingsfortablet", "Amazon Profiles", "kids", "Optional profiles and Family Library settings", "amazon"),
+        rule("com.amazon.hedwig", "Fire TV Channels", "media", "Optional channel discovery app", "amazon"),
+        rule("com.amazon.ods.kindleconnect", "Amazon Screen Sharing", "support", "Optional remote support screen sharing", "amazon"),
+        rule("com.amazon.tablet.voiceassistant", "Alexa Voice Assistant", "assistant", "Optional Alexa voice service", "amazon"),
+        rule("com.amazon.tahoe", "Amazon Kids+", "kids", "Optional kids content and launcher", "amazon"),
         rule("com.amazon.kindle", "Kindle", "media", "Optional reading app", "amazon"),
         rule("com.amazon.photos", "Amazon Photos", "media", "Optional photo backup app", "amazon"),
         rule("com.amazon.mp3", "Amazon Music", "media", "Optional music app", "amazon"),
         rule("com.amazon.weather", "Amazon Weather", "oem", "Optional weather app", "amazon"),
         rule("com.amazon.windowshop", "Amazon Shopping", "promotions", "Optional shopping app", "amazon"),
         rule("com.amazon.imdb.tv.mobile.app", "IMDb", "media", "Optional entertainment app", "amazon"),
-        rule("com.goodreads.kindle", "Goodreads", "media", "Optional reading community app", "amazon")
+        rule("com.amazon.advertisingidsettings", "Amazon Advertising ID", "telemetry", "Optional advertising identifier controls", "amazon"),
+        rule("com.amazon.client.metrics", "Amazon Client Metrics", "telemetry", "Optional Amazon usage metrics service", "amazon"),
+        rule("com.amazon.client.metrics.api", "Amazon Client Metrics API", "telemetry", "Optional Amazon usage metrics interface", "amazon"),
+        rule("com.amazon.device.metrics", "Amazon Device Metrics", "telemetry", "Optional Amazon device metrics uploader", "amazon"),
+        rule("com.amazon.dp.logger", "Amazon DP Logger", "telemetry", "Optional Amazon diagnostics logger", "amazon"),
+        rule("com.amazon.hybridadidservice", "Amazon Hybrid Ad ID", "telemetry", "Optional advertising identifier service", "amazon"),
+        rule("com.amazon.wirelessmetrics.service", "Amazon Wireless Metrics", "telemetry", "Optional wireless usage metrics", "amazon"),
+        rule("com.audible.application.kindle", "Audible", "media", "Optional audiobook storefront", "amazon"),
+        rule("com.goodreads.kindle", "Goodreads", "media", "Optional reading community app", "amazon"),
+        rule("com.kingsoft.office.amz", "WPS Office for Amazon", "productivity", "Optional office suite", "amazon")
     ));
 
     private static final Set<String> PROTECTED_PACKAGES = Collections.unmodifiableSet(
@@ -124,6 +164,33 @@ public final class DebloatCatalog {
             "com.android.wallpaper.livepicker",
             "com.android.wallpaperbackup",
             "com.android.wallpapercropper",
+            "com.amazon.application.compatibility.enforcer",
+            "com.amazon.appverification",
+            "com.amazon.device.software.ota",
+            "com.amazon.device.software.ota.override",
+            "com.amazon.firelauncher",
+            "com.amazon.frameworksettings",
+            "com.amazon.kindle.otter.oobe",
+            "com.amazon.kindle.otter.oobe.forced.ota",
+            "com.amazon.parentalcontrols",
+            "com.amazon.pm",
+            "com.amazon.settings",
+            "com.amazon.settings.systemupdates",
+            "com.amazon.venezia",
+            "com.amazon.webview.chromium",
+            "com.android.tv.settings",
+            "com.google.android.leanbacklauncher",
+            "com.google.android.tv.remote.service",
+            "com.google.android.tvlauncher",
+            "com.tcl.android.webview",
+            "com.tcl.inputmethod.international",
+            "com.tcl.keycustomfunctionservice",
+            "com.tcl.rc.ota",
+            "com.tcl.settings",
+            "com.tcl.tcl_bt_rcu_service",
+            "com.tcl.tv",
+            "com.tcl.tvinput",
+            "com.tcl.versionUpdateApp",
             "com.tblenovo.wallpaper",
             "com.zui.theme.settings",
             "com.zui.themes.provider",
@@ -163,6 +230,7 @@ public final class DebloatCatalog {
         }
         if (combined.contains("huawei") || combined.contains("honor")) return "huawei";
         if (combined.contains("amazon") || combined.contains("amzn")) return "amazon";
+        if (combined.contains("tcl")) return "tcl";
         return "generic";
     }
 

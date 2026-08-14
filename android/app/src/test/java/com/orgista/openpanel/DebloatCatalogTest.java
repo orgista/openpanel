@@ -21,7 +21,23 @@ public class DebloatCatalogTest {
         assertEquals("oplus", DebloatCatalog.profileFor("OnePlus", "OnePlus"));
         assertEquals("huawei", DebloatCatalog.profileFor("HONOR", "HONOR"));
         assertEquals("amazon", DebloatCatalog.profileFor("Amazon", "Amazon"));
+        assertEquals("tcl", DebloatCatalog.profileFor("TCL", "TCL"));
         assertEquals("generic", DebloatCatalog.profileFor("Google", "google"));
+    }
+
+    @Test
+    public void tclTvPolicyContainsOnlyReviewedOptionalServices() {
+        List<DebloatCatalog.Rule> rules = DebloatCatalog.rulesFor("TCL", "TCL");
+        Set<String> packages = new HashSet<>();
+        for (DebloatCatalog.Rule rule : rules) packages.add(rule.packageName);
+
+        assertTrue(packages.contains("com.google.android.youtube.tv"));
+        assertTrue(packages.contains("com.google.android.tv.bugreportsender"));
+        assertTrue(packages.contains("com.tcl.bi"));
+        assertTrue(packages.contains("com.tcl.bootadservice"));
+        assertTrue(packages.contains("com.tcl.showmode"));
+        assertFalse(packages.contains("com.google.android.tvlauncher"));
+        assertFalse(packages.contains("com.tcl.tvinput"));
     }
 
     @Test
@@ -51,6 +67,50 @@ public class DebloatCatalogTest {
         assertTrue(DebloatCatalog.isProtectedPackage("app.xrdm.client"));
         assertTrue(DebloatCatalog.isProtectedPackage("com.orgista.openpanel"));
         assertFalse(DebloatCatalog.isProtectedPackage("com.lenovo.hec.lenovoextend"));
+    }
+
+    @Test
+    public void amazonPolicyRecognizesReviewedFireOsApps() {
+        List<DebloatCatalog.Rule> rules = DebloatCatalog.rulesFor("Amazon", "Amazon");
+        Set<String> packages = new HashSet<>();
+        for (DebloatCatalog.Rule rule : rules) packages.add(rule.packageName);
+
+        assertTrue(packages.contains("com.amazon.afe.app"));
+        assertTrue(packages.contains("com.amazon.avod"));
+        assertTrue(packages.contains("com.amazon.dee.app"));
+        assertTrue(packages.contains("com.amazon.firespotlight"));
+        assertTrue(packages.contains("com.amazon.client.metrics"));
+        assertTrue(packages.contains("com.amazon.device.metrics"));
+        assertTrue(packages.contains("com.amazon.hybridadidservice"));
+        assertTrue(packages.contains("com.amazon.tahoe"));
+        assertTrue(packages.contains("com.amazon.wirelessmetrics.service"));
+        assertTrue(packages.contains("com.audible.application.kindle"));
+        assertTrue(packages.contains("com.kingsoft.office.amz"));
+    }
+
+    @Test
+    public void fireOsCoreLauncherPolicyAndSetupStayProtected() {
+        assertTrue(DebloatCatalog.isProtectedPackage("com.amazon.firelauncher"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.amazon.settings"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.amazon.frameworksettings"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.amazon.webview.chromium"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.amazon.device.software.ota"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.amazon.device.software.ota.override"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.amazon.kindle.otter.oobe"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.amazon.parentalcontrols"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.amazon.pm"));
+        assertFalse(DebloatCatalog.isProtectedPackage("com.amazon.firespotlight"));
+    }
+
+    @Test
+    public void tvLaunchersInputsSettingsAndUpdatesStayProtected() {
+        assertTrue(DebloatCatalog.isProtectedPackage("com.google.android.tvlauncher"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.google.android.tv.remote.service"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.tcl.keycustomfunctionservice"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.tcl.settings"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.tcl.tvinput"));
+        assertTrue(DebloatCatalog.isProtectedPackage("com.tcl.versionUpdateApp"));
+        assertFalse(DebloatCatalog.isProtectedPackage("com.tcl.bi"));
     }
 
     @Test

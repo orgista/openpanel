@@ -29,4 +29,7 @@ export default defineConfig({
     },
   },
   assetsInclude: ['**/*.svg', '**/*.csv'],
+  test: {
+    include: ['src/**/*.test.{ts,tsx}'],
+  },
 })

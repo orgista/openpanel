@@ -1,0 +1,15 @@
+# OpenPanel TV local DNS overrides for personalDNSfilter.
+#
+# Keep this list exact and small. The primary 1Hosts Lite list supplies broad
+# ad/tracker coverage; these entries cover recurring TV telemetry observed on
+# the local network without blocking Google, YouTube, Netflix, TCL updates,
+# CDNs, or other first-party service domains.
+
+app-measurement.com
+firebaselogging-pa.googleapis.com
+ad.doubleclick.net
+googleads.g.doubleclick.net
+pagead2.googlesyndication.com
+pubads.g.doubleclick.net
+static.doubleclick.net
+tpc.googlesyndication.com

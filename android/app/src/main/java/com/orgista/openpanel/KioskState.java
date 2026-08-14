@@ -54,6 +54,14 @@ final class KioskState {
         return MODE_STANDALONE.equals(mode) && enabled;
     }
 
+    static boolean isLockTaskActive(int state) {
+        return state != 0;
+    }
+
+    static boolean canReliablyStartLockTask(boolean deviceOwner, boolean fireDevice) {
+        return deviceOwner || !fireDevice;
+    }
+
     static String normalizeMode(String mode) {
         return MODE_STANDALONE.equals(mode) ? MODE_STANDALONE : MODE_COMPANION;
     }
