@@ -1,5 +1,6 @@
 package com.orgista.openpanel;
 
+import android.annotation.SuppressLint;
 import android.accessibilityservice.AccessibilityService;
 import android.content.ComponentName;
 import android.content.Intent;
@@ -238,6 +239,7 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
         }
     }
 
+    @SuppressLint("WrongConstant")
     private void collapseNotificationShade() {
         boolean collapsed = false;
         try {
