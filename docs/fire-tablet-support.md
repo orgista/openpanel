@@ -16,8 +16,8 @@ Android device, product, and build codename is `quartz`. See Amazon's
 | Physical display | 600×1024 at 160 dpi |
 | OpenPanel orientation | Reverse landscape (`user_rotation=3`) |
 | OpenPanel app viewport | 1024×552 after Fire OS's 48 px navigation inset |
-| Verified OpenPanel build | 1.1.35-debug, version code 44 |
-| Local artifact name | `openpanel-1.1.35-fire7-12thgen-kfquwi-debug.apk` |
+| Verified OpenPanel build | 1.1.37-debug, version code 46 |
+| Local artifact name | `openpanel-1.1.37-fire-kids-kiosk-debug.apk` |
 | Verification date | 2026-08-14 |
 
 ## UI verification
@@ -48,6 +48,35 @@ does not generate an enrollment QR that would disappear during a factory reset.
 Fire OS can reserve the bottom 48 px even when CSS reports the full 600 px
 physical height. Responsive modal rules must account for that inset; testing at
 an ordinary 1024×600 desktop viewport alone is not sufficient.
+
+## Game display compatibility
+
+Some game APKs declare their launcher activity as non-resizable. Fire OS 8 then
+uses Android size-compatibility mode when the tablet is locked to landscape,
+rendering the game in a roughly 600×351 window with large black borders. Apply
+the following device-provisioning settings after confirming that ADB is pointed
+at model `KFQUWI`, not another wireless Android device:
+
+```sh
+adb -s "$ADB_SERIAL" shell settings put global force_resizable_activities 1
+adb -s "$ADB_SERIAL" shell wm set-user-rotation lock 3
+adb -s "$ADB_SERIAL" shell wm set-fix-to-user-rotation disabled
+```
+
+Confirm the target and effective settings with:
+
+```sh
+adb -s "$ADB_SERIAL" shell getprop ro.product.model
+adb -s "$ADB_SERIAL" shell getprop ro.serialno
+adb -s "$ADB_SERIAL" shell settings get global force_resizable_activities
+adb -s "$ADB_SERIAL" shell dumpsys window displays
+```
+
+The resizable-activity override lets games use the full display instead of a
+small size-compatibility window. Disabling fixed-to-user rotation allows a
+portrait-only game to rotate into the full 600×1024 portrait display. OpenPanel
+and landscape-native games return to reverse landscape. Do not patch and
+re-sign third-party APKs to change their declared orientation.
 
 ## Build and publication policy
 

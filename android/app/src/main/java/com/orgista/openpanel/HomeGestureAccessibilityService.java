@@ -10,9 +10,12 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -36,12 +39,18 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
     private static final int MAXIMUM_HORIZONTAL_DRIFT_DP = 96;
     private static final long FIRE_LAUNCHER_REDIRECT_DEBOUNCE_MS = 500;
     private static final long SHADE_COLLAPSE_DEBOUNCE_MS = 400;
+    private static final long[] TRANSITION_POLICY_DELAYS_MS = {250, 1_000, 3_000};
     private static final String HOME_ALIAS_CLASS =
         "com.orgista.openpanel.OpenPanelHomeActivity";
 
     private WindowManager windowManager;
     private View homeHandle;
     private View shadeGuard;
+    private final Handler policyHandler = new Handler(Looper.getMainLooper());
+    private final Runnable transitionPolicy = () -> {
+        LandscapeOrientationLock.enforce(this);
+        KioskVolumePolicy.enforceTarget(this);
+    };
     private long lastFireLauncherRedirectMs;
     private long lastShadeCollapseMs;
 
@@ -49,6 +58,7 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
     protected void onServiceConnected() {
         super.onServiceConnected();
         LandscapeOrientationLock.enforce(this);
+        KioskVolumePolicy.enforceTarget(this);
         addHomeHandle();
         addShadeGuard();
         syncShadeGuardVisibility(getPackageName());
@@ -58,11 +68,13 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         LandscapeOrientationLock.enforce(this);
+        KioskVolumePolicy.enforceTarget(this);
         if (event == null
                 || (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
                     && event.getEventType() != AccessibilityEvent.TYPE_WINDOWS_CHANGED)) {
             return;
         }
+        scheduleTransitionPolicy();
         CharSequence packageName = event.getPackageName();
         String windowPackage = packageName == null ? null : packageName.toString();
         boolean homeEnabled = isOpenPanelHomeEnabled();
@@ -108,6 +120,19 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
     }
 
     @Override
+    protected boolean onKeyEvent(KeyEvent event) {
+        if (event != null
+                && KioskVolumePolicy.isVolumeMutationKey(event.getKeyCode())
+                && KioskVolumePolicy.shouldLock(this)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                KioskVolumePolicy.enforceTarget(this);
+            }
+            return true;
+        }
+        return super.onKeyEvent(event);
+    }
+
+    @Override
     public boolean onUnbind(Intent intent) {
         removeOverlays();
         return super.onUnbind(intent);
@@ -115,8 +140,23 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
 
     @Override
     public void onDestroy() {
+        policyHandler.removeCallbacks(transitionPolicy);
         removeOverlays();
         super.onDestroy();
+    }
+
+    /**
+     * Fire OS and some games apply their requested portrait/volume policy just
+     * after the window-change callback. Reassert kiosk policy across that short
+     * transition window so child apps remain in the mounted landscape and do
+     * not lower the device's locked media volume.
+     */
+    private void scheduleTransitionPolicy() {
+        policyHandler.removeCallbacks(transitionPolicy);
+        transitionPolicy.run();
+        for (long delayMs : TRANSITION_POLICY_DELAYS_MS) {
+            policyHandler.postDelayed(transitionPolicy, delayMs);
+        }
     }
 
     private void addHomeHandle() {

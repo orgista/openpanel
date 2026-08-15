@@ -6,9 +6,12 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.KeyEvent;
+import android.view.View;
 import android.webkit.WebView;
 
 import androidx.activity.OnBackPressedCallback;
+import androidx.core.splashscreen.SplashScreen;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -32,13 +35,19 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        // Theme.SplashScreen on pre-Android 12 devices needs the compat
+        // handoff before BridgeActivity creates its WebView. Without this the
+        // TCL launch window remains solid black throughout Capacitor startup.
+        SplashScreen.installSplashScreen(this);
         registerPlugin(SystemBridgePlugin.class);
         registerPlugin(LibraryBridgePlugin.class);
         super.onCreate(savedInstanceState);
         logLifecycle("created");
         installRemoteBackHandler();
         configureWebViewTextInput();
+        LandscapeOrientationLock.enforce(this);
         hideSystemBars();
+        KioskVolumePolicy.enforceTarget(this);
     }
 
     @Override
@@ -50,6 +59,9 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        LandscapeOrientationLock.enforce(this);
+        hideSystemBars();
+        KioskVolumePolicy.enforceTarget(this);
         logLifecycle("resumed");
     }
 
@@ -111,9 +123,23 @@ public class MainActivity extends BridgeActivity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
+            LandscapeOrientationLock.enforce(this);
             hideSystemBars();
+            KioskVolumePolicy.enforceTarget(this);
             if (KioskState.shouldAutoPin(this)) pinKioskIfUnlocked();
         }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (KioskVolumePolicy.isVolumeMutationKey(event.getKeyCode())
+                && KioskVolumePolicy.shouldLock(this)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                KioskVolumePolicy.enforceTarget(this);
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     // In explicitly enabled standalone mode, screen pinning closes the
@@ -147,5 +173,18 @@ public class MainActivity extends BridgeActivity {
         // Bars stay hidden; a swipe from the edge reveals them briefly.
         controller.setSystemBarsBehavior(
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+
+        // Fire OS 8 keeps a black gesture-navigation inset when only the
+        // WindowInsets API is used. The legacy immersive-layout flags are
+        // still honored there and let the WebView fill the full 1024x600
+        // display while preserving transient edge reveals.
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        );
     }
 }

@@ -25,4 +25,18 @@ final class DeviceProfileClassifier {
     static boolean showsBattery(String deviceType, boolean hasBattery) {
         return hasBattery && !"television".equals(deviceType);
     }
+
+    static String displayControllerName(String name) {
+        if (name == null) return null;
+        String trimmed = name.trim();
+        String normalized = trimmed.toLowerCase(java.util.Locale.ROOT);
+        if (trimmed.isEmpty() || normalized.startsWith("sim-") || normalized.startsWith("virtual-")) {
+            return null;
+        }
+        return trimmed;
+    }
+
+    static String controllerNameForDevice(boolean television, String detectedName) {
+        return television ? null : displayControllerName(detectedName);
+    }
 }

@@ -55,6 +55,7 @@ public final class DebloatCatalog {
         rule("com.google.android.leanbacklauncher.recommendations", "Android TV Recommendations", "promotions", "Legacy home-screen recommendations", "generic"),
         rule("com.google.android.youtube.tv", "YouTube for Android TV", "media", "OpenPanel provides its own restricted YouTube player", "generic"),
         rule("com.google.android.youtube.tvmusic", "YouTube Music for Android TV", "media", "Optional unrestricted music app", "generic"),
+        rule("com.google.android.videos", "Google TV / Play Movies", "media", "Optional consumer video storefront running behind the OpenPanel launcher", "generic"),
         rule("com.android.chrome", "Chrome", "browser", "OpenPanel provides a restricted child-safe web fallback", "generic"),
         rule("org.mozilla.firefox", "Firefox", "browser", "Optional unrestricted browser", "generic"),
         rule("org.mozilla.fenix", "Firefox", "browser", "Optional unrestricted browser", "generic"),

@@ -51,4 +51,24 @@ public class DeviceProfileClassifierTest {
         assertTrue(DeviceProfileClassifier.showsBattery("tablet", true));
         assertFalse(DeviceProfileClassifier.showsBattery("tablet", false));
     }
+
+    @Test
+    public void syntheticControllerNamesAreNotShownToPeople() {
+        assertEquals(null, DeviceProfileClassifier.displayControllerName(null));
+        assertEquals(null, DeviceProfileClassifier.displayControllerName("  "));
+        assertEquals(null, DeviceProfileClassifier.displayControllerName("sim-mouse"));
+        assertEquals(null, DeviceProfileClassifier.displayControllerName("virtual-search"));
+        assertEquals(
+            "Chromecast Voice Remote",
+            DeviceProfileClassifier.displayControllerName(" Chromecast Voice Remote ")
+        );
+        assertEquals(
+            null,
+            DeviceProfileClassifier.controllerNameForDevice(true, "mtkinp")
+        );
+        assertEquals(
+            "Chromecast Voice Remote",
+            DeviceProfileClassifier.controllerNameForDevice(false, "Chromecast Voice Remote")
+        );
+    }
 }

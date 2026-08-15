@@ -17,6 +17,9 @@ final class LaunchableAppCatalog {
     private static final Set<String> HIDDEN_PACKAGES = Collections.unmodifiableSet(
         new HashSet<>(Arrays.asList(
             "com.teslacoilsw.launcher",
+            "com.netflix.mediaclient",
+            "com.netflix.ninja",
+            "com.spotify.music",
             "com.aurora.store",
             "org.fdroid.fdroid",
             "com.android.vending",

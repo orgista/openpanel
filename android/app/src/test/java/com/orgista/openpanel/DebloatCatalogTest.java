@@ -32,6 +32,7 @@ public class DebloatCatalogTest {
         for (DebloatCatalog.Rule rule : rules) packages.add(rule.packageName);
 
         assertTrue(packages.contains("com.google.android.youtube.tv"));
+        assertTrue(packages.contains("com.google.android.videos"));
         assertTrue(packages.contains("com.google.android.tv.bugreportsender"));
         assertTrue(packages.contains("com.tcl.bi"));
         assertTrue(packages.contains("com.tcl.bootadservice"));

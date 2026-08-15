@@ -9,13 +9,22 @@
         <item name="colorAccent">@color/colorAccent</item>
     </style>
 
-    <!-- Launch window: plain black, no logo. Android 12+ always shows a launch
-         frame on cold start; keeping it black and icon-free makes it read as
-         "no splash" on the kiosk instead of the OpenPanel logo card. -->
+    <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+    </style>
+
+    <!-- Keep the established launcher mark visible while an older TV WebView
+         performs its first render. A blank launch frame looked like a crash on
+         low-memory Android TV hardware. -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@android:color/black</item>
-        <item name="windowSplashScreenAnimatedIcon">@android:color/transparent</item>
-        <item name="android:background">@android:color/black</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
+        <item name="android:windowBackground">@drawable/openpanel_launch_background</item>
     </style>
 
     <style name="AppTheme.Reader" parent="Theme.AppCompat.DayNight.NoActionBar">

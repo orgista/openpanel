@@ -47,6 +47,7 @@ import android.util.Log;
 import android.view.InputDevice;
 import android.view.View;
 import android.view.inputmethod.InputMethodManager;
+import android.webkit.WebView;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -69,11 +70,7 @@ import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.lang.reflect.Method;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -86,6 +83,13 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 @CapacitorPlugin(
     name = "SystemBridge",
@@ -109,6 +113,13 @@ public class SystemBridgePlugin extends Plugin {
     private static final String PREF_MANAGE_NOTIFICATIONS = "manage_notifications";
     private static final String PREF_HIDDEN_PACKAGES = "hidden_packages";
     private static final String PREF_NOTIFICATION_PACKAGES = "notification_packages";
+    private static final OkHttpClient YOUTUBE_HTTP_CLIENT = new OkHttpClient.Builder()
+        .dns(Ipv4FirstDns.INSTANCE)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build();
 
     private BroadcastReceiver btScanReceiver;
     private BroadcastReceiver btStateReceiver;
@@ -172,6 +183,35 @@ public class SystemBridgePlugin extends Plugin {
         });
     }
 
+    @PluginMethod
+    public void setLegacyTvCompatRendering(PluginCall call) {
+        boolean enabled = call.getBoolean("enabled", false);
+        Activity activity = getActivity();
+        WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+        boolean legacyTelevision = Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+            && getContext().getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+
+        if (activity == null || webView == null || !legacyTelevision) {
+            JSObject result = new JSObject();
+            result.put("applied", false);
+            result.put("enabled", enabled);
+            call.resolve(result);
+            return;
+        }
+
+        activity.runOnUiThread(() -> {
+            webView.setLayerType(
+                enabled ? View.LAYER_TYPE_SOFTWARE : View.LAYER_TYPE_HARDWARE,
+                null
+            );
+            Log.i(LOG_TAG, "Legacy TV compatibility rendering " + (enabled ? "enabled" : "disabled"));
+            JSObject result = new JSObject();
+            result.put("applied", true);
+            result.put("enabled", enabled);
+            call.resolve(result);
+        });
+    }
+
     // ---------- Google TV input + API-key-free YouTube channel verification ----------
 
     @PluginMethod
@@ -209,8 +249,9 @@ public class SystemBridgePlugin extends Plugin {
                 || (sources & InputDevice.SOURCE_HDMI) == InputDevice.SOURCE_HDMI;
             if (dpad) {
                 hasDpad = true;
-                if (controllerName == null && device.getName() != null && !device.getName().trim().isEmpty()) {
-                    controllerName = device.getName().trim();
+                String displayName = DeviceProfileClassifier.displayControllerName(device.getName());
+                if (controllerName == null && displayName != null) {
+                    controllerName = displayName;
                 }
             }
             if (device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC) {
@@ -231,8 +272,13 @@ public class SystemBridgePlugin extends Plugin {
             hasDpad,
             hasTouchscreen
         );
+        controllerName = DeviceProfileClassifier.controllerNameForDevice(
+            isTelevision,
+            controllerName
+        );
 
         JSObject profile = new JSObject();
+        profile.put("sdk", Build.VERSION.SDK_INT);
         profile.put("deviceType", deviceType);
         profile.put("isTelevision", isTelevision);
         profile.put("isTablet", "tablet".equals(deviceType));
@@ -300,31 +346,29 @@ public class SystemBridgePlugin extends Plugin {
             call.reject(error.getMessage(), "INVALID_YOUTUBE_CHANNEL");
             return;
         }
+        CuratedYouTubeCatalog.Channel curated =
+            CuratedYouTubeCatalog.match(input, lookupUrl);
+        if (curated != null) {
+            resolveYouTubeChannelResult(
+                call,
+                curated.channelId,
+                curated.canonicalUrl(),
+                curated.title,
+                curated.thumbnailUrl
+            );
+            return;
+        }
         ioExecutor.execute(() -> performYouTubeChannelResolution(call, lookupUrl));
     }
 
     private void performYouTubeChannelResolution(PluginCall call, String lookupUrl) {
-        HttpURLConnection connection = null;
-        try {
-            connection = (HttpURLConnection) new URL(lookupUrl).openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(15000);
-            connection.setInstanceFollowRedirects(true);
-            connection.setRequestProperty("Accept", "text/html,application/xhtml+xml");
-            connection.setRequestProperty("Accept-Encoding", "identity");
-            connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
-            connection.setRequestProperty(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE
-                    + ") AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36"
-            );
-
-            int status = connection.getResponseCode();
-            InputStream stream = status >= 200 && status < 300
-                ? connection.getInputStream()
-                : connection.getErrorStream();
-            String body = readStream(stream);
+        Request request = youtubeGetRequest(
+            lookupUrl,
+            "text/html,application/xhtml+xml"
+        ).build();
+        try (Response httpResponse = YOUTUBE_HTTP_CLIENT.newCall(request).execute()) {
+            int status = httpResponse.code();
+            String body = readResponseBody(httpResponse);
             if (status == 404) {
                 call.reject(
                     "That exact YouTube channel was not found. Try its unique @handle.",
@@ -346,20 +390,13 @@ public class SystemBridgePlugin extends Plugin {
 
             YouTubeChannelResolver.ResolvedChannel resolved =
                 YouTubeChannelResolver.parseVerifiedPage(body);
-            JSObject channel = new JSObject();
-            channel.put("kind", "channel");
-            channel.put("sourceId", resolved.channelId);
-            channel.put("sourceUrl", resolved.canonicalUrl);
-            String title = plainText(resolved.title);
-            channel.put("title", title);
-            channel.put("channelTitle", title);
-            channel.put(
-                "thumbnailUrl",
-                resolved.thumbnailUrl == null ? JSONObject.NULL : resolved.thumbnailUrl
+            resolveYouTubeChannelResult(
+                call,
+                resolved.channelId,
+                resolved.canonicalUrl,
+                resolved.title,
+                resolved.thumbnailUrl
             );
-            JSObject response = new JSObject();
-            response.put("channel", channel);
-            call.resolve(response);
         } catch (IllegalArgumentException error) {
             call.reject(
                 error.getMessage() + ". Try the channel's unique @handle.",
@@ -371,9 +408,27 @@ public class SystemBridgePlugin extends Plugin {
                 "YOUTUBE_CHANNEL_LOOKUP_FAILED",
                 error
             );
-        } finally {
-            if (connection != null) connection.disconnect();
         }
+    }
+
+    private void resolveYouTubeChannelResult(
+        PluginCall call,
+        String channelId,
+        String canonicalUrl,
+        String rawTitle,
+        String thumbnailUrl
+    ) {
+        JSObject channel = new JSObject();
+        channel.put("kind", "channel");
+        channel.put("sourceId", channelId);
+        channel.put("sourceUrl", canonicalUrl);
+        String title = plainText(rawTitle);
+        channel.put("title", title);
+        channel.put("channelTitle", title);
+        channel.put("thumbnailUrl", thumbnailUrl == null ? JSONObject.NULL : thumbnailUrl);
+        JSObject response = new JSObject();
+        response.put("channel", channel);
+        call.resolve(response);
     }
 
     @PluginMethod
@@ -387,6 +442,8 @@ public class SystemBridgePlugin extends Plugin {
             call.reject(error.getMessage(), "INVALID_YOUTUBE_CHANNEL");
             return;
         }
+
+        if (pageToken.isEmpty() && resolveCuratedYouTubeCatalog(call, channelId)) return;
 
         if (!pageToken.isEmpty()) {
             final YouTubeCatalogCursor cursor;
@@ -404,28 +461,43 @@ public class SystemBridgePlugin extends Plugin {
         ioExecutor.execute(() -> performYouTubeChannelCatalogLookup(call, channelId, catalogUrl));
     }
 
+    private boolean resolveCuratedYouTubeCatalog(PluginCall call, String channelId) {
+        CuratedYouTubeCatalog.Channel channel =
+            CuratedYouTubeCatalog.forChannelId(channelId);
+        if (channel == null) return false;
+
+        JSArray videos = new JSArray();
+        for (CuratedYouTubeCatalog.Video video : channel.videos) {
+            JSObject item = new JSObject();
+            item.put("videoId", video.videoId);
+            item.put("title", plainText(video.title));
+            item.put("thumbnailUrl", video.thumbnailUrl);
+            item.put("publishedAt", video.publishedAt);
+            videos.put(item);
+        }
+        JSObject response = new JSObject();
+        response.put("channelTitle", channel.title);
+        response.put("videos", videos);
+        response.put("nextPageToken", JSONObject.NULL);
+        response.put("hasMore", false);
+        response.put("catalogComplete", false);
+        response.put("catalogSource", "recent-feed");
+        call.resolve(response);
+        return true;
+    }
+
     private void performYouTubeChannelCatalogLookup(
         PluginCall call,
         String channelId,
         String catalogUrl
     ) {
-        HttpURLConnection connection = null;
-        try {
-            connection = (HttpURLConnection) new URL(catalogUrl).openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(15000);
-            connection.setInstanceFollowRedirects(true);
-            connection.setRequestProperty("Accept", "text/html,application/xhtml+xml");
-            connection.setRequestProperty("Accept-Encoding", "identity");
-            connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
-            connection.setRequestProperty("User-Agent", youtubeWebUserAgent());
-
-            int status = connection.getResponseCode();
-            InputStream stream = status >= 200 && status < 300
-                ? connection.getInputStream()
-                : connection.getErrorStream();
-            String body = readStream(stream);
+        Request request = youtubeGetRequest(
+            catalogUrl,
+            "text/html,application/xhtml+xml"
+        ).build();
+        try (Response httpResponse = YOUTUBE_HTTP_CLIENT.newCall(request).execute()) {
+            int status = httpResponse.code();
+            String body = readResponseBody(httpResponse);
             if (status < 200 || status >= 300) {
                 throw new IllegalArgumentException("YouTube channel catalog is temporarily unavailable");
             }
@@ -454,8 +526,6 @@ public class SystemBridgePlugin extends Plugin {
                 channelId,
                 YouTubeChannelFeedParser.feedUrl(channelId)
             );
-        } finally {
-            if (connection != null) connection.disconnect();
         }
     }
 
@@ -464,26 +534,9 @@ public class SystemBridgePlugin extends Plugin {
         String pageToken,
         YouTubeCatalogCursor cursor
     ) {
-        HttpURLConnection connection = null;
         try {
             String clientVersion = YouTubeChannelCatalogParser.validateClientVersion(cursor.clientVersion);
             String continuation = YouTubeChannelCatalogParser.validateContinuation(cursor.continuation);
-            connection = (HttpURLConnection) new URL(
-                YouTubeChannelCatalogParser.continuationUrl(cursor.apiKey)
-            ).openConnection();
-            connection.setRequestMethod("POST");
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(15000);
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("Accept-Encoding", "identity");
-            connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-            connection.setRequestProperty("Origin", "https://www.youtube.com");
-            connection.setRequestProperty("Referer", YouTubeChannelCatalogParser.pageUrl(cursor.channelId));
-            connection.setRequestProperty("User-Agent", youtubeWebUserAgent());
-            connection.setRequestProperty("X-YouTube-Client-Name", "2");
-            connection.setRequestProperty("X-YouTube-Client-Version", clientVersion);
 
             JSONObject client = new JSONObject();
             client.put("clientName", "MWEB");
@@ -492,43 +545,52 @@ public class SystemBridgePlugin extends Plugin {
             client.put("gl", "US");
             JSONObject context = new JSONObject();
             context.put("client", client);
-            JSONObject request = new JSONObject();
-            request.put("context", context);
-            request.put("continuation", continuation);
-            byte[] requestBody = request.toString().getBytes(StandardCharsets.UTF_8);
-            connection.setFixedLengthStreamingMode(requestBody.length);
-            try (OutputStream output = connection.getOutputStream()) {
-                output.write(requestBody);
-            }
-
-            int status = connection.getResponseCode();
-            InputStream stream = status >= 200 && status < 300
-                ? connection.getInputStream()
-                : connection.getErrorStream();
-            String body = readStream(stream);
-            if (status == 429) {
-                call.reject("YouTube is temporarily limiting channel browsing", "YOUTUBE_CHANNEL_RATE_LIMITED");
-                return;
-            }
-            if (status < 200 || status >= 300) {
-                call.reject("OpenPanel could not load older channel videos", "YOUTUBE_CHANNEL_PAGE_FAILED");
-                return;
-            }
-
-            YouTubeChannelCatalogParser.CatalogPage page =
-                YouTubeChannelCatalogParser.parseContinuation(body);
-            synchronized (youtubeCatalogCursors) {
-                youtubeCatalogCursors.remove(pageToken);
-            }
-            resolveYouTubeCatalogPage(
-                call,
-                cursor.channelId,
-                "",
-                page,
-                cursor.apiKey,
-                clientVersion,
-                "channel-page"
+            JSONObject payload = new JSONObject();
+            payload.put("context", context);
+            payload.put("continuation", continuation);
+            RequestBody requestBody = RequestBody.create(
+                MediaType.parse("application/json; charset=UTF-8"),
+                payload.toString()
             );
+            Request request = youtubeRequest(
+                YouTubeChannelCatalogParser.continuationUrl(cursor.apiKey),
+                "application/json"
+            )
+                .header("Content-Type", "application/json; charset=UTF-8")
+                .header("Origin", "https://www.youtube.com")
+                .header("Referer", YouTubeChannelCatalogParser.pageUrl(cursor.channelId))
+                .header("X-YouTube-Client-Name", "2")
+                .header("X-YouTube-Client-Version", clientVersion)
+                .post(requestBody)
+                .build();
+
+            try (Response httpResponse = YOUTUBE_HTTP_CLIENT.newCall(request).execute()) {
+                int status = httpResponse.code();
+                String body = readResponseBody(httpResponse);
+                if (status == 429) {
+                    call.reject("YouTube is temporarily limiting channel browsing", "YOUTUBE_CHANNEL_RATE_LIMITED");
+                    return;
+                }
+                if (status < 200 || status >= 300) {
+                    call.reject("OpenPanel could not load older channel videos", "YOUTUBE_CHANNEL_PAGE_FAILED");
+                    return;
+                }
+
+                YouTubeChannelCatalogParser.CatalogPage page =
+                    YouTubeChannelCatalogParser.parseContinuation(body);
+                synchronized (youtubeCatalogCursors) {
+                    youtubeCatalogCursors.remove(pageToken);
+                }
+                resolveYouTubeCatalogPage(
+                    call,
+                    cursor.channelId,
+                    "",
+                    page,
+                    cursor.apiKey,
+                    clientVersion,
+                    "channel-page"
+                );
+            }
         } catch (IllegalArgumentException error) {
             call.reject(error.getMessage(), "YOUTUBE_CHANNEL_PAGE_INVALID");
         } catch (Exception error) {
@@ -537,8 +599,6 @@ public class SystemBridgePlugin extends Plugin {
                 "YOUTUBE_CHANNEL_PAGE_FAILED",
                 error
             );
-        } finally {
-            if (connection != null) connection.disconnect();
         }
     }
 
@@ -605,27 +665,31 @@ public class SystemBridgePlugin extends Plugin {
             + ") AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36";
     }
 
+    private static Request.Builder youtubeGetRequest(String url, String accept) {
+        return youtubeRequest(url, accept).get();
+    }
+
+    private static Request.Builder youtubeRequest(String url, String accept) {
+        return new Request.Builder()
+            .url(url)
+            .header("Accept", accept)
+            .header("Accept-Encoding", "identity")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("User-Agent", youtubeWebUserAgent());
+    }
+
     private void performYouTubeChannelFeedLookup(
         PluginCall call,
         String channelId,
         String feedUrl
     ) {
-        HttpURLConnection connection = null;
-        try {
-            connection = (HttpURLConnection) new URL(feedUrl).openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(15000);
-            connection.setInstanceFollowRedirects(true);
-            connection.setRequestProperty("Accept", "application/atom+xml,application/xml,text/xml");
-            connection.setRequestProperty("Accept-Encoding", "identity");
-            connection.setRequestProperty("User-Agent", "OpenPanel/1.1 (Android " + Build.VERSION.RELEASE + ")");
-
-            int status = connection.getResponseCode();
-            InputStream stream = status >= 200 && status < 300
-                ? connection.getInputStream()
-                : connection.getErrorStream();
-            String body = readStream(stream);
+        Request request = youtubeGetRequest(
+            feedUrl,
+            "application/atom+xml,application/xml,text/xml"
+        ).build();
+        try (Response httpResponse = YOUTUBE_HTTP_CLIENT.newCall(request).execute()) {
+            int status = httpResponse.code();
+            String body = readResponseBody(httpResponse);
             if (status == 404) {
                 call.reject("This channel's recent videos are unavailable", "YOUTUBE_CHANNEL_FEED_NOT_FOUND");
                 return;
@@ -666,9 +730,12 @@ public class SystemBridgePlugin extends Plugin {
                 "YOUTUBE_CHANNEL_FEED_FAILED",
                 error
             );
-        } finally {
-            if (connection != null) connection.disconnect();
         }
+    }
+
+    private static String readResponseBody(Response response) throws Exception {
+        if (response.body() == null) return "";
+        return readStream(response.body().byteStream());
     }
 
     private static String readStream(InputStream stream) throws Exception {
@@ -1675,6 +1742,20 @@ public class SystemBridgePlugin extends Plugin {
             return;
         }
 
+        // Fire OS does not allow a regular, non-device-owner kiosk app to save
+        // a device-wide Wi-Fi configuration. WifiNetworkSuggestion leaves a
+        // misleading "Available via OpenPanel" entry and can become stuck after
+        // authentication fails. Delegate Fire tablets to the system picker so
+        // Fire OS owns the saved network and credential.
+        if (LandscapeOrientationLock.isFireDevice(Build.MANUFACTURER, Build.BRAND)) {
+            launchWifiSettings();
+            JSObject ret = new JSObject();
+            ret.put("status", "system-settings");
+            ret.put("code", 0);
+            call.resolve(ret);
+            return;
+        }
+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             connectLegacyWifi(call, ssid, password);
             return;
@@ -1788,6 +1869,11 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void openWifiSettings(PluginCall call) {
+        launchWifiSettings();
+        call.resolve();
+    }
+
+    private void launchWifiSettings() {
         Intent intent;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             intent = new Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY);
@@ -1796,7 +1882,6 @@ public class SystemBridgePlugin extends Plugin {
         }
         unpinIfPinned();
         getActivity().startActivity(intent);
-        call.resolve();
     }
 
     // ---------- Bluetooth ----------
