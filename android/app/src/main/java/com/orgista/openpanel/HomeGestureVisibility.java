@@ -2,9 +2,12 @@ package com.orgista.openpanel;
 
 /** Decides when the opt-in escape gesture should accept touches. */
 final class HomeGestureVisibility {
+    // Both OpenPanel variants are named deliberately: the production build and a
+    // debug build installed beside it are each treated as "self" here, so this
+    // stays a literal pair rather than BuildConfig.APPLICATION_ID (one variant).
     private static final String OPENPANEL_PACKAGE = "com.orgista.openpanel";
     private static final String OPENPANEL_DEBUG_PACKAGE = "com.orgista.openpanel.debug";
-    private static final String ARBORXR_PACKAGE = "app.xrdm.client";
+    private static final String ARBORXR_PACKAGE = NotificationBlockPolicy.ARBORXR_DPC_PACKAGE;
 
     private HomeGestureVisibility() {}
 

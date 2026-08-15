@@ -20,9 +20,9 @@ OPDS 1.2 and OPDS 2.0 catalogs for discovery and acquisition.
   routing, and saved position.
 - Resume the most recently opened publication from its stored Readium Locator.
 
-Project Gutenberg is included because it exposes a stable public OPDS feed and
-provides public-domain publications. Administrators can add their library's own
-OPDS endpoint without modifying the app.
+OpenPanel does not bundle or preconfigure a catalog. Administrators may add
+Project Gutenberg or their library's own approved OPDS endpoint after
+deployment without modifying the app.
 
 ## Lending, authentication, and DRM boundary
 

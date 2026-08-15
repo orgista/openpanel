@@ -2,7 +2,6 @@ package com.orgista.openpanel;
 
 import android.annotation.SuppressLint;
 import android.accessibilityservice.AccessibilityService;
-import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Canvas;
@@ -40,8 +39,6 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
     private static final long FIRE_LAUNCHER_REDIRECT_DEBOUNCE_MS = 500;
     private static final long SHADE_COLLAPSE_DEBOUNCE_MS = 400;
     private static final long[] TRANSITION_POLICY_DELAYS_MS = {250, 1_000, 3_000};
-    private static final String HOME_ALIAS_CLASS =
-        "com.orgista.openpanel.OpenPanelHomeActivity";
 
     private WindowManager windowManager;
     private View homeHandle;
@@ -358,11 +355,7 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
     }
 
     private boolean isOpenPanelHomeEnabled() {
-        ComponentName homeAlias = new ComponentName(getPackageName(), HOME_ALIAS_CLASS);
-        int state = getPackageManager().getComponentEnabledSetting(homeAlias);
-        return state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED
-            && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
-            && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED;
+        return DeviceAccess.isOpenPanelHomeEnabled(this);
     }
 
     private int dp(float value) {

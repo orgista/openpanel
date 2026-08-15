@@ -19,9 +19,11 @@ import androidx.fragment.app.commitNow
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.readium.adapter.exoplayer.audio.ExoPlayerEngineProvider
@@ -68,6 +70,12 @@ class LibraryReaderActivity : AppCompatActivity() {
     private var navigator: Navigator? = null
     private var audioNavigator: AudioNavigator<ExoPlayerSettings, ExoPlayerPreferences>? = null
     private var progressionJob: Job? = null
+    // Latest reading position, coalesced across rapid currentLocator emissions.
+    // A debounced job persists it off the main thread; onStop flushes the tail.
+    private var pendingLocatorJson: String? = null
+    private var pendingProgression: Double = 0.0
+    private var hasPendingSave = false
+    private var saveJob: Job? = null
     private var epubPreferences = EpubPreferences(fontSize = 1.0, theme = Theme.LIGHT)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -304,8 +312,37 @@ class LibraryReaderActivity : AppCompatActivity() {
             val progression = locator.locations.totalProgression
                 ?: locator.locations.progression
                 ?: 0.0
-            repository.saveProgress(publicationId, locator.toJSON().toString(), progression)
+            // Record the newest position and coalesce writes. The full-library
+            // JSON rewrite is expensive, so persist at most once per debounce
+            // window (last-position-wins) instead of on every emission.
+            pendingLocatorJson = locator.toJSON().toString()
+            pendingProgression = progression
+            hasPendingSave = true
+            scheduleProgressSave()
         }.launchIn(lifecycleScope)
+    }
+
+    private fun scheduleProgressSave() {
+        // Debounce: restart the timer on each emission so the (expensive) write
+        // happens once the position settles, not on every locator tick. The tail
+        // is also flushed in onStop so nothing is lost on close/background.
+        saveJob?.cancel()
+        saveJob = lifecycleScope.launch {
+            delay(PROGRESS_SAVE_DEBOUNCE_MS)
+            flushProgress()
+        }
+    }
+
+    private suspend fun flushProgress() {
+        if (!hasPendingSave) return
+        val json = pendingLocatorJson ?: return
+        val progression = pendingProgression
+        hasPendingSave = false
+        // The repository re-parses and rewrites the entire publications JSON to
+        // SharedPreferences; keep that off the main thread.
+        withContext(Dispatchers.IO) {
+            repository.saveProgress(publicationId, json, progression)
+        }
     }
 
     private fun showFailure(message: String) {
@@ -335,8 +372,27 @@ class LibraryReaderActivity : AppCompatActivity() {
 
     private fun formatTime(seconds: Long): String = DateUtils.formatElapsedTime(seconds.coerceAtLeast(0))
 
+    override fun onStop() {
+        super.onStop()
+        // Guarantee the last observed position is persisted even if the debounce
+        // window had not elapsed. Blocks briefly on IO so the write completes
+        // before the activity is torn down (last-position-wins).
+        saveJob?.cancel()
+        if (hasPendingSave) {
+            val json = pendingLocatorJson
+            val progression = pendingProgression
+            hasPendingSave = false
+            if (json != null) {
+                runBlocking(Dispatchers.IO) {
+                    repository.saveProgress(publicationId, json, progression)
+                }
+            }
+        }
+    }
+
     override fun onDestroy() {
         progressionJob?.cancel()
+        saveJob?.cancel()
         audioNavigator?.close()
         publication?.close()
         super.onDestroy()
@@ -353,5 +409,6 @@ class LibraryReaderActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_PUBLICATION_ID = "publicationId"
         private const val NAVIGATOR_TAG = "openpanel-reader-navigator"
+        private const val PROGRESS_SAVE_DEBOUNCE_MS = 1_500L
     }
 }

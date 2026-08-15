@@ -45,6 +45,11 @@ android {
         jvmTarget = '21'
         freeCompilerArgs += ['-Xannotation-default-target=param-property']
     }
+    buildFeatures {
+        // Generate BuildConfig so native code can read VERSION_NAME/APPLICATION_ID
+        // instead of hardcoding them (AGP 8 disables this feature by default).
+        buildConfig true
+    }
     packagingOptions {
         resources.excludes += ['META-INF/LICENSE.md', 'META-INF/LICENSE-notice.md']
     }

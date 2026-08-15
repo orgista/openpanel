@@ -3,6 +3,9 @@ package com.orgista.openpanel;
 import android.app.AppOpsManager;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.os.Build;
 import android.os.PowerManager;
 import android.os.Process;
@@ -20,7 +23,36 @@ import android.text.TextUtils;
  * here for a status read plus a deep link into the right Settings screen.
  */
 final class DeviceAccess {
+    /** OpenPanel's HOME activity-alias; toggled to make OpenPanel the launcher. */
+    static final String HOME_ALIAS_CLASS = "com.orgista.openpanel.OpenPanelHomeActivity";
+
     private DeviceAccess() {}
+
+    /**
+     * Whether OpenPanel's HOME alias is currently enabled (i.e. OpenPanel is a
+     * candidate launcher). Shared by the bridge and the accessibility service so
+     * the enabled-state check stays identical in both.
+     */
+    static boolean isOpenPanelHomeEnabled(Context context) {
+        ComponentName alias = new ComponentName(context.getPackageName(), HOME_ALIAS_CLASS);
+        int state = context.getPackageManager().getComponentEnabledSetting(alias);
+        return state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+            && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+            && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED;
+    }
+
+    /**
+     * The package of the current default Home/launcher, or null. Resolved fresh
+     * on every call so a changed default launcher is reflected immediately.
+     * Shared by the bridge and the notification blocker.
+     */
+    static String resolvedHomePackage(Context context) {
+        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+        ResolveInfo resolved = context.getPackageManager()
+            .resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
+        return resolved != null && resolved.activityInfo != null
+            ? resolved.activityInfo.packageName : null;
+    }
 
     static boolean isAccessibilityServiceEnabled(Context context) {
         ComponentName service = new ComponentName(context, HomeGestureAccessibilityService.class);

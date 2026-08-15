@@ -43,6 +43,12 @@ public final class LibraryBridgePlugin extends Plugin {
     private static final long MAX_CATALOG_BYTES = 5L * 1024L * 1024L;
     private static final long MAX_PUBLICATION_BYTES = 1024L * 1024L * 1024L;
     private static final int NETWORK_TIMEOUT_MS = 20_000;
+    // Derive the outbound User-Agent from the build version so it never drifts
+    // from build.gradle's versionName again.
+    private static final String USER_AGENT_OPDS =
+        "OpenPanel/" + BuildConfig.VERSION_NAME + " (OPDS reader)";
+    private static final String USER_AGENT_DOWNLOAD =
+        "OpenPanel/" + BuildConfig.VERSION_NAME + " (institutional reader)";
     private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
     private LibraryRepository repository;
 
@@ -453,7 +459,7 @@ public final class LibraryBridgePlugin extends Plugin {
             connection.setReadTimeout(NETWORK_TIMEOUT_MS);
             connection.setInstanceFollowRedirects(false);
             connection.setRequestProperty("Accept", "application/opds+json, application/atom+xml;profile=opds-catalog, application/atom+xml, application/json;q=0.9");
-            connection.setRequestProperty("User-Agent", "OpenPanel/1.1.29 (OPDS reader)");
+            connection.setRequestProperty("User-Agent", USER_AGENT_OPDS);
             int status = connection.getResponseCode();
             if (status >= 300 && status < 400) {
                 current = resolveUrl(current, connection.getHeaderField("Location"));
@@ -495,7 +501,7 @@ public final class LibraryBridgePlugin extends Plugin {
             connection.setConnectTimeout(NETWORK_TIMEOUT_MS);
             connection.setReadTimeout(NETWORK_TIMEOUT_MS);
             connection.setInstanceFollowRedirects(false);
-            connection.setRequestProperty("User-Agent", "OpenPanel/1.1.29 (institutional reader)");
+            connection.setRequestProperty("User-Agent", USER_AGENT_DOWNLOAD);
             int status = connection.getResponseCode();
             if (status >= 300 && status < 400) {
                 current = resolveUrl(current, connection.getHeaderField("Location"));

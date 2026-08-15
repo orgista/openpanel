@@ -81,6 +81,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -105,14 +106,16 @@ import okhttp3.Response;
 public class SystemBridgePlugin extends Plugin {
 
     // ArborXR's MDM client is the Device Owner on managed devices.
-    private static final String ARBORXR_DPC = "app.xrdm.client";
+    private static final String ARBORXR_DPC = NotificationBlockPolicy.ARBORXR_DPC_PACKAGE;
     private static final String LOG_TAG = "OpenPanel";
-    private static final String HOME_ALIAS_CLASS =
-        "com.orgista.openpanel.OpenPanelHomeActivity";
-    private static final String DEVICE_HEALTH_PREFS = "openpanel.device_health.v1";
-    private static final String PREF_MANAGE_NOTIFICATIONS = "manage_notifications";
+    private static final String HOME_ALIAS_CLASS = DeviceAccess.HOME_ALIAS_CLASS;
+    // Prefs contract shared with NotificationBlockPolicy (single source of truth).
+    private static final String DEVICE_HEALTH_PREFS = NotificationBlockPolicy.PREFS;
+    private static final String PREF_MANAGE_NOTIFICATIONS = NotificationBlockPolicy.PREF_ENABLED;
     private static final String PREF_HIDDEN_PACKAGES = "hidden_packages";
     private static final String PREF_NOTIFICATION_PACKAGES = "notification_packages";
+    // Native mirror of the web layer's admin PIN verifier; see requireKioskAdmin().
+    private static final String PREF_KIOSK_ADMIN_VERIFIER = "kiosk_admin_verifier";
     private static final OkHttpClient YOUTUBE_HTTP_CLIENT = new OkHttpClient.Builder()
         .dns(Ipv4FirstDns.INSTANCE)
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -124,7 +127,13 @@ public class SystemBridgePlugin extends Plugin {
     private BroadcastReceiver btScanReceiver;
     private BroadcastReceiver btStateReceiver;
     private BroadcastReceiver bondReceiver;
+    // The kept-alive pairBluetooth call currently awaiting a bond result, so a
+    // superseding pair request or teardown can settle it instead of leaking it.
+    private PluginCall pendingPairCall;
     private BroadcastReceiver batteryReceiver;
+    // Encoded launcher icons keyed by "package@versionCode" so getInstalledApps
+    // never re-rasterizes an unchanged icon.
+    private final Map<String, String> iconCache = new ConcurrentHashMap<>();
     private final List<JSObject> btScanResults = new ArrayList<>();
     // Guards the in-flight scan call + its watchdog so a scan settles exactly
     // once, even if the timeout, DISCOVERY_FINISHED, and adapter-off events race.
@@ -346,18 +355,6 @@ public class SystemBridgePlugin extends Plugin {
             call.reject(error.getMessage(), "INVALID_YOUTUBE_CHANNEL");
             return;
         }
-        CuratedYouTubeCatalog.Channel curated =
-            CuratedYouTubeCatalog.match(input, lookupUrl);
-        if (curated != null) {
-            resolveYouTubeChannelResult(
-                call,
-                curated.channelId,
-                curated.canonicalUrl(),
-                curated.title,
-                curated.thumbnailUrl
-            );
-            return;
-        }
         ioExecutor.execute(() -> performYouTubeChannelResolution(call, lookupUrl));
     }
 
@@ -443,8 +440,6 @@ public class SystemBridgePlugin extends Plugin {
             return;
         }
 
-        if (pageToken.isEmpty() && resolveCuratedYouTubeCatalog(call, channelId)) return;
-
         if (!pageToken.isEmpty()) {
             final YouTubeCatalogCursor cursor;
             synchronized (youtubeCatalogCursors) {
@@ -459,31 +454,6 @@ public class SystemBridgePlugin extends Plugin {
         }
 
         ioExecutor.execute(() -> performYouTubeChannelCatalogLookup(call, channelId, catalogUrl));
-    }
-
-    private boolean resolveCuratedYouTubeCatalog(PluginCall call, String channelId) {
-        CuratedYouTubeCatalog.Channel channel =
-            CuratedYouTubeCatalog.forChannelId(channelId);
-        if (channel == null) return false;
-
-        JSArray videos = new JSArray();
-        for (CuratedYouTubeCatalog.Video video : channel.videos) {
-            JSObject item = new JSObject();
-            item.put("videoId", video.videoId);
-            item.put("title", plainText(video.title));
-            item.put("thumbnailUrl", video.thumbnailUrl);
-            item.put("publishedAt", video.publishedAt);
-            videos.put(item);
-        }
-        JSObject response = new JSObject();
-        response.put("channelTitle", channel.title);
-        response.put("videos", videos);
-        response.put("nextPageToken", JSONObject.NULL);
-        response.put("hasMore", false);
-        response.put("catalogComplete", false);
-        response.put("catalogSource", "recent-feed");
-        call.resolve(response);
-        return true;
     }
 
     private void performYouTubeChannelCatalogLookup(
@@ -660,6 +630,10 @@ public class SystemBridgePlugin extends Plugin {
         return cursorId;
     }
 
+    // Deliberately spoofs a common mobile-Chrome browser so YouTube's public
+    // channel/feed pages return the standard web markup the resolvers parse. The
+    // Chrome major version is pinned on purpose; bump it only when YouTube starts
+    // gating on a newer build. This is the sole definition of this UA.
     private static String youtubeWebUserAgent() {
         return "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE
             + ") AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36";
@@ -744,7 +718,10 @@ public class SystemBridgePlugin extends Plugin {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                body.append(line);
+                // Re-add the stripped line separator so values that span line
+                // breaks aren't silently concatenated (the channel-resolver and
+                // feed regexes depend on the original newlines being present).
+                body.append(line).append('\n');
                 if (body.length() > 2_000_000) {
                     throw new IllegalArgumentException("YouTube returned an unexpectedly large channel page");
                 }
@@ -829,6 +806,9 @@ public class SystemBridgePlugin extends Plugin {
             try { getContext().unregisterReceiver(bondReceiver); } catch (Exception ignored) {}
             bondReceiver = null;
         }
+        // A pairing may still be in flight (system dialog open) at teardown; settle
+        // its kept-alive call so the JS Promise never hangs. Mirrors finishBtScan.
+        settlePendingPairCall("Pairing was interrupted", "PAIR_INTERRUPTED");
         if (batteryReceiver != null) {
             try { getContext().unregisterReceiver(batteryReceiver); } catch (Exception ignored) {}
             batteryReceiver = null;
@@ -1126,11 +1106,7 @@ public class SystemBridgePlugin extends Plugin {
     }
 
     private String resolvedHomePackage() {
-        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
-        ResolveInfo resolved = getContext().getPackageManager()
-            .resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
-        return resolved != null && resolved.activityInfo != null
-            ? resolved.activityInfo.packageName : null;
+        return DeviceAccess.resolvedHomePackage(getContext());
     }
 
     private boolean isNotificationPolicyProtected(String packageName) {
@@ -1495,47 +1471,72 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void getInstalledApps(PluginCall call) {
-        PackageManager pm = getContext().getPackageManager();
-        List<ResolveInfo> activities = LaunchableAppCatalog.query(pm);
+        // Rasterizing + PNG + base64 for every launcher icon is heavy, so run off
+        // Capacitor's single plugin handler thread and cache encoded icons.
+        ioExecutor.execute(() -> {
+            PackageManager pm = getContext().getPackageManager();
+            List<ResolveInfo> activities = LaunchableAppCatalog.query(pm);
 
-        Set<String> seen = new HashSet<>();
-        JSArray apps = new JSArray();
-        String self = getContext().getPackageName();
-        DevicePolicyManager policy = (DevicePolicyManager) getContext().getSystemService(Context.DEVICE_POLICY_SERVICE);
+            Set<String> seen = new HashSet<>();
+            JSArray apps = new JSArray();
+            String self = getContext().getPackageName();
+            DevicePolicyManager policy = (DevicePolicyManager) getContext().getSystemService(Context.DEVICE_POLICY_SERVICE);
 
-        for (ResolveInfo ri : activities) {
-            String pkg = ri.activityInfo.packageName;
-            if (pkg.equals(self)
-                || !LaunchableAppCatalog.isVisiblePackage(pkg)
-                || !seen.add(pkg)) continue;
+            for (ResolveInfo ri : activities) {
+                String pkg = ri.activityInfo.packageName;
+                if (pkg.equals(self)
+                    || !LaunchableAppCatalog.isVisiblePackage(pkg)
+                    || !seen.add(pkg)) continue;
 
-            try {
-                ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
-                boolean isSystem = (ai.flags & (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
+                try {
+                    ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
+                    boolean isSystem = (ai.flags & (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
 
-                String installer = null;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    InstallSourceInfo src = pm.getInstallSourceInfo(pkg);
-                    installer = src.getInstallingPackageName();
-                    if (installer == null) installer = src.getInitiatingPackageName();
-                } else {
-                    installer = pm.getInstallerPackageName(pkg);
-                }
+                    String installer = null;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        InstallSourceInfo src = pm.getInstallSourceInfo(pkg);
+                        installer = src.getInstallingPackageName();
+                        if (installer == null) installer = src.getInitiatingPackageName();
+                    } else {
+                        installer = pm.getInstallerPackageName(pkg);
+                    }
 
-                JSObject app = new JSObject();
-                app.put("packageName", pkg);
-                app.put("label", pm.getApplicationLabel(ai).toString());
-                app.put("isSystem", isSystem);
-                app.put("installer", installer);
-                app.put("lockTaskPermitted", isLockTaskPermitted(policy, pkg));
-                app.put("icon", drawableToBase64(pm.getApplicationIcon(ai)));
-                apps.put(app);
-            } catch (Exception ignored) {}
+                    JSObject app = new JSObject();
+                    app.put("packageName", pkg);
+                    app.put("label", pm.getApplicationLabel(ai).toString());
+                    app.put("isSystem", isSystem);
+                    app.put("installer", installer);
+                    app.put("lockTaskPermitted", isLockTaskPermitted(policy, pkg));
+                    app.put("icon", encodedIcon(pm, pkg, ai));
+                    apps.put(app);
+                } catch (Exception ignored) {}
+            }
+
+            JSObject ret = new JSObject();
+            ret.put("apps", apps);
+            call.resolve(ret);
+        });
+    }
+
+    // Cache the encoded icon per package + versionCode; a reinstall/update bumps
+    // the version code and invalidates the stale entry automatically.
+    private String encodedIcon(PackageManager pm, String pkg, ApplicationInfo ai) {
+        String cacheKey = pkg + "@" + packageVersionCode(pm, pkg);
+        String cached = iconCache.get(cacheKey);
+        if (cached != null) return cached;
+        String encoded = drawableToBase64(pm.getApplicationIcon(ai));
+        if (encoded != null) iconCache.put(cacheKey, encoded);
+        return encoded;
+    }
+
+    private long packageVersionCode(PackageManager pm, String pkg) {
+        try {
+            PackageInfo info = pm.getPackageInfo(pkg, 0);
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                ? info.getLongVersionCode() : info.versionCode;
+        } catch (Exception ignored) {
+            return -1L;
         }
-
-        JSObject ret = new JSObject();
-        ret.put("apps", apps);
-        call.resolve(ret);
     }
 
     private boolean isLockTaskPermitted(DevicePolicyManager policy, String packageName) {
@@ -2075,6 +2076,16 @@ public class SystemBridgePlugin extends Plugin {
         }
     }
 
+    // Settles the kept-alive pair call exactly once (reject). No-op when none is
+    // pending. Mirrors how finishBtScan settles the scan call. Main-thread only.
+    private void settlePendingPairCall(String message, String code) {
+        PluginCall call = pendingPairCall;
+        pendingPairCall = null;
+        if (call == null) return;
+        call.setKeepAlive(false);
+        call.reject(message, code);
+    }
+
     // Settles the in-flight scan exactly once. Safe to call from the discovery
     // broadcast, the watchdog, adapter-off, a new scan, or teardown; extra calls
     // after the first are no-ops because btScanCall is cleared atomically.
@@ -2134,16 +2145,19 @@ public class SystemBridgePlugin extends Plugin {
                 return;
             }
 
-            // Only one pairing can be in flight; drop any stale receiver so it
-            // is tracked in a field and handleOnDestroy can always unregister it
-            // (the terminal BONDED/NONE broadcast may never arrive if the plugin
-            // is torn down while the system pairing dialog is still open).
+            // Only one pairing can be in flight. Settle any previously kept-alive
+            // pair call before starting a new one (otherwise its JS Promise leaks)
+            // and drop its receiver so handleOnDestroy can always clean up. The
+            // terminal BONDED/NONE broadcast may never arrive if the plugin is torn
+            // down while the system pairing dialog is still open.
             if (bondReceiver != null) {
                 try { getContext().unregisterReceiver(bondReceiver); } catch (Exception ignored) {}
                 bondReceiver = null;
             }
+            settlePendingPairCall("Superseded by a newer pairing request", "PAIR_SUPERSEDED");
 
             call.setKeepAlive(true);
+            pendingPairCall = call;
             bondReceiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
@@ -2152,12 +2166,14 @@ public class SystemBridgePlugin extends Plugin {
                     int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
                     if (state == BluetoothDevice.BOND_BONDED) {
                         unregisterBondReceiver();
+                        pendingPairCall = null;
                         JSObject ret = new JSObject();
                         ret.put("status", "paired");
                         call.setKeepAlive(false);
                         call.resolve(ret);
                     } else if (state == BluetoothDevice.BOND_NONE) {
                         unregisterBondReceiver();
+                        pendingPairCall = null;
                         call.setKeepAlive(false);
                         call.reject("Pairing failed or was cancelled", "PAIR_FAILED");
                     }
@@ -2167,11 +2183,13 @@ public class SystemBridgePlugin extends Plugin {
 
             if (!device.createBond()) {
                 unregisterBondReceiver();
+                pendingPairCall = null;
                 call.setKeepAlive(false);
                 call.reject("Could not start pairing", "PAIR_FAILED");
             }
         } catch (SecurityException e) {
             unregisterBondReceiver();
+            pendingPairCall = null;
             call.setKeepAlive(false);
             call.reject("Bluetooth permission not granted", "PERMISSION_DENIED");
         }
@@ -2321,11 +2339,7 @@ public class SystemBridgePlugin extends Plugin {
     }
 
     private boolean isOpenPanelHomeEnabled() {
-        int state = getContext().getPackageManager()
-            .getComponentEnabledSetting(openPanelHomeAlias());
-        return state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED
-            && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
-            && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED;
+        return DeviceAccess.isOpenPanelHomeEnabled(getContext());
     }
 
     private int lockTaskState() {
@@ -2489,8 +2503,76 @@ public class SystemBridgePlugin extends Plugin {
         call.resolve();
     }
 
+    // ---------- Native admin authorization for kiosk-dismantling actions ----------
+
+    /**
+     * Mirror the web layer's admin PIN verifier into native SharedPreferences so
+     * the kiosk-dismantling bridge methods can be gated natively. See
+     * requireKioskAdmin() for the contract. The web layer calls this with
+     * { verifier: <the same salted, non-reversible hash it stores in localStorage> }
+     * on PIN create/change, and clears it (empty verifier) when the PIN is removed.
+     * The raw PIN is never passed here.
+     */
+    @PluginMethod
+    public void setKioskAdminVerifier(PluginCall call) {
+        String verifier = call.getString("verifier", "");
+        SharedPreferences.Editor editor = deviceHealthPrefs().edit();
+        if (verifier == null || verifier.isEmpty()) {
+            editor.remove(PREF_KIOSK_ADMIN_VERIFIER);
+        } else {
+            editor.putString(PREF_KIOSK_ADMIN_VERIFIER, verifier);
+        }
+        editor.apply();
+        call.resolve();
+    }
+
+    /**
+     * Native authorization gate for the kiosk-dismantling bridge methods
+     * (disableKioskLock, exitKioskToSystemHome, clearDeviceOwner) and the
+     * caller-supplied lock-task allowlist in enableKioskLock.
+     *
+     * The admin PIN itself lives in the WebView's localStorage (a salted hash),
+     * which native code cannot read, so any script running in the WebView could
+     * otherwise call these methods directly and dismantle the kiosk. This guard
+     * requires the caller to prove knowledge of an admin verifier that the web
+     * layer mirrors into native prefs via setKioskAdminVerifier().
+     *
+     * Assumed contract (documented for the web layer):
+     *   - On PIN create/change: SystemBridge.setKioskAdminVerifier({ verifier }).
+     *   - Each gated call passes { adminToken: &lt;that same verifier value&gt; }.
+     *
+     * Migration safety: until a verifier is provisioned the gate fails OPEN (logs
+     * a warning) so existing installs and the documented Device-Owner escape hatch
+     * keep working; once provisioned it fails CLOSED. This is scaffolding, not a
+     * bypass — no PIN or token is hardcoded, and once provisioned these methods
+     * cannot be driven without the verifier.
+     */
+    private boolean requireKioskAdmin(PluginCall call, String methodName) {
+        String verifier = deviceHealthPrefs().getString(PREF_KIOSK_ADMIN_VERIFIER, null);
+        if (verifier == null || verifier.isEmpty()) {
+            Log.w(LOG_TAG, "Kiosk admin gate unprovisioned; allowing " + methodName
+                + " (web layer has not called setKioskAdminVerifier)");
+            return true;
+        }
+        if (constantTimeEquals(verifier, call.getString("adminToken", ""))) return true;
+        Log.w(LOG_TAG, "Kiosk admin gate rejected " + methodName + " (missing/invalid adminToken)");
+        call.reject("Admin authorization required", "ADMIN_AUTH_REQUIRED");
+        return false;
+    }
+
+    private static boolean constantTimeEquals(String expected, String provided) {
+        if (expected == null || provided == null) return false;
+        if (expected.length() != provided.length()) return false;
+        int diff = 0;
+        for (int i = 0; i < expected.length(); i++) {
+            diff |= expected.charAt(i) ^ provided.charAt(i);
+        }
+        return diff == 0;
+    }
+
     @PluginMethod
     public void enableKioskLock(final PluginCall call) {
+        if (!requireKioskAdmin(call, "enableKioskLock")) return;
         if (!KioskState.MODE_STANDALONE.equals(KioskState.getMode(getContext()))) {
             call.reject("OpenPanel only starts its own kiosk lock in standalone mode", "WRONG_MODE");
             return;
@@ -2580,16 +2662,11 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void disableKioskLock(final PluginCall call) {
+        if (!requireKioskAdmin(call, "disableKioskLock")) return;
         KioskState.setEnabled(getContext(), false);
         // Restore the status bar / notification shade that enableKioskLock hid
         // as Device Owner, so exiting the kiosk returns a normal, usable device.
-        final DevicePolicyManager dpm = dpm();
-        final String pkg = getContext().getPackageName();
-        if (dpm != null && dpm.isDeviceOwnerApp(pkg)) {
-            try {
-                dpm.setStatusBarDisabled(OpenPanelDeviceAdminReceiver.getComponentName(getContext()), false);
-            } catch (Exception ignored) {}
-        }
+        KioskLock.releaseStatusBar(getContext());
         getActivity().runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -2612,6 +2689,7 @@ public class SystemBridgePlugin extends Plugin {
      */
     @PluginMethod
     public void exitKioskToSystemHome(final PluginCall call) {
+        if (!requireKioskAdmin(call, "exitKioskToSystemHome")) return;
         KioskState.setEnabled(getContext(), false);
         KioskState.setKeyguardDisabled(getContext(), false);
 
@@ -2696,6 +2774,7 @@ public class SystemBridgePlugin extends Plugin {
     // this, so it's the safe escape hatch from a provisioned kiosk.
     @PluginMethod
     public void clearDeviceOwner(final PluginCall call) {
+        if (!requireKioskAdmin(call, "clearDeviceOwner")) return;
         final DevicePolicyManager dpm = dpm();
         final String pkg = getContext().getPackageName();
         if (dpm == null || !dpm.isDeviceOwnerApp(pkg)) {

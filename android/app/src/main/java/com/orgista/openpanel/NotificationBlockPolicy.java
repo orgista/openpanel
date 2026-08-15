@@ -11,6 +11,9 @@ import java.util.Set;
 final class NotificationBlockPolicy {
     static final String PREFS = "openpanel.device_health.v1";
     static final String PREF_ENABLED = "manage_notifications";
+    /** Single source of truth for ArborXR's MDM/DPC package (the Device Owner on
+     *  managed devices). Referenced from the bridge and gesture layer too. */
+    static final String ARBORXR_DPC_PACKAGE = "app.xrdm.client";
 
     private static final Set<String> OPERATIONAL_PACKAGES = new HashSet<>(Arrays.asList(
         "android",
@@ -28,7 +31,7 @@ final class NotificationBlockPolicy {
         "com.amazon.cellbroadcastreceiver",
         "com.amazon.dpcclient",
         "com.amazon.firelauncher",
-        "app.xrdm.client",
+        ARBORXR_DPC_PACKAGE,
         "dnsfilter.android",
         "moe.shizuku.privileged.api"
     ));

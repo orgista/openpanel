@@ -29,11 +29,6 @@ final class KioskLock {
         return (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
     }
 
-    static boolean isDeviceOwner(Context context) {
-        DevicePolicyManager dpm = dpm(context);
-        return dpm != null && dpm.isDeviceOwnerApp(context.getPackageName());
-    }
-
     /**
      * As Device Owner, allowlist OpenPanel (plus any extra packages, merged with
      * the current allowlist so previously-added apps stay launchable) and hide

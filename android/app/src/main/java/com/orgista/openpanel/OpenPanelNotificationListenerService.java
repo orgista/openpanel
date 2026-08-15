@@ -1,7 +1,6 @@
 package com.orgista.openpanel;
 
 import android.app.Notification;
-import android.content.Intent;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
@@ -14,13 +13,10 @@ public final class OpenPanelNotificationListenerService extends NotificationList
     private static WeakReference<OpenPanelNotificationListenerService> connected =
         new WeakReference<>(null);
 
-    private String resolvedHomePackage;
-
     @Override
     public void onListenerConnected() {
         super.onListenerConnected();
         connected = new WeakReference<>(this);
-        resolvedHomePackage = resolveHomePackage();
         cancelManagedNotifications();
         Log.i(LOG_TAG, "Notification blocker connected");
     }
@@ -34,8 +30,11 @@ public final class OpenPanelNotificationListenerService extends NotificationList
     @Override
     public void onNotificationPosted(StatusBarNotification notification) {
         if (notification == null || !NotificationBlockPolicy.isEnabled(this)) return;
+        // Re-resolve the default launcher per event so a changed default home's
+        // notifications are never wrongly cancelled (nor wrongly preserved).
         if (NotificationBlockPolicy.shouldPreserve(
-                notification.getPackageName(), getPackageName(), resolvedHomePackage)) {
+                notification.getPackageName(), getPackageName(),
+                DeviceAccess.resolvedHomePackage(this))) {
             return;
         }
         cancelSafely(notification);
@@ -56,9 +55,10 @@ public final class OpenPanelNotificationListenerService extends NotificationList
             return;
         }
         if (active == null) return;
+        String homePackage = DeviceAccess.resolvedHomePackage(this);
         for (StatusBarNotification notification : active) {
             if (!NotificationBlockPolicy.shouldPreserve(
-                    notification.getPackageName(), getPackageName(), resolvedHomePackage)) {
+                    notification.getPackageName(), getPackageName(), homePackage)) {
                 cancelSafely(notification);
             }
         }
@@ -75,12 +75,5 @@ public final class OpenPanelNotificationListenerService extends NotificationList
         } catch (RuntimeException error) {
             Log.w(LOG_TAG, "Could not block notification from " + notification.getPackageName(), error);
         }
-    }
-
-    private String resolveHomePackage() {
-        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
-        android.content.pm.ResolveInfo resolved = getPackageManager().resolveActivity(home, 0);
-        return resolved != null && resolved.activityInfo != null
-            ? resolved.activityInfo.packageName : null;
     }
 }

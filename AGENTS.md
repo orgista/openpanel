@@ -1,5 +1,32 @@
 # OpenPanel agent instructions
 
+## Master content configuration policy
+
+OpenPanel must ship with an empty user-content catalog. Never hardcode requested
+apps, package selections, websites, URLs, YouTube videos/channels/playlists,
+library catalogs, media, titles, thumbnails, ordering, or deployment-specific
+content in TypeScript, JavaScript, Java, Kotlin, Android resources, bundled
+assets, build scripts, or production defaults.
+
+When the user asks to add or change deployable content, record every requested
+item in `POST_DEPLOYMENT_CONTENT.txt` instead. That file is a human operations
+checklist only: application code, tests, builds, seeders, and deployment scripts
+must never parse, import, copy, or automatically apply it. Content must be added
+after deployment through OpenPanel's admin UI or the authorized device-management
+workflow, and only to the explicitly requested devices or groups.
+
+For each requested item, record its type, display name, URL or identifier,
+intended target, ordering/metadata requirements, and deployment status. Do not
+put credentials, API keys, tokens, private URLs, or other secrets in the file.
+If OpenPanel has no post-deployment configuration path for a requested item,
+record the gap and report it rather than hardcoding a workaround.
+
+This policy does not prohibit product-owned branding, ordinary interface copy,
+protocol/provider endpoints needed to implement a feature, security allowlists,
+device/package detection policy, or clearly isolated test fixtures that cannot
+enter a production build. These exceptions must not be used to smuggle a
+deployable content catalog into the application.
+
 ## ArborXR upload policy
 
 Codex may build and verify OpenPanel APKs locally without additional

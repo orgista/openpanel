@@ -38,7 +38,8 @@ alongside **ArborXR** (companion mode) or on its own (standalone kiosk).
 - **Books & Audio:** imports EPUB, PDF, Readium audiobook, MP3, and AAC files;
   reads OPDS 1.2/2.0 catalogs without WebView CORS restrictions; stores
   publications privately for offline use; and resumes reading/listening with
-  Readium navigators. Project Gutenberg is included as an open-access catalog.
+  Readium navigators. Open-access and institutional catalogs are added by an
+  administrator after deployment; none are bundled as content defaults.
   Licensed lending systems still require the institution's authorized
   authentication/DRM connector. See [`docs/library-opds-readium.md`](docs/library-opds-readium.md).
 - **Forward-compatible Android build:** no maximum Android version is declared;
