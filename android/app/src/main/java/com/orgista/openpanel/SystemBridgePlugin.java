@@ -68,6 +68,7 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.lang.reflect.Method;
@@ -193,6 +194,54 @@ public class SystemBridgePlugin extends Plugin {
                 keyboard.showSoftInput(target, InputMethodManager.SHOW_IMPLICIT);
             }
             call.resolve();
+        });
+    }
+
+    @PluginMethod
+    public void fetchImageAsDataUrl(PluginCall call) {
+        // The WebView's own image loads flake on some tablets/networks (it does
+        // not get the IPv4-first DNS treatment our OkHttp client has), so
+        // channel art is fetched natively and persisted as a data URL that can
+        // never rot or race Wi-Fi at boot.
+        String url = call.getString("url", "");
+        android.net.Uri parsed = url == null || url.isEmpty() ? null : android.net.Uri.parse(url);
+        String host = parsed == null ? null : parsed.getHost();
+        boolean trustedHost = host != null && (
+            host.equals("yt3.googleusercontent.com")
+            || host.equals("yt3.ggpht.com")
+            || host.equals("i.ytimg.com"));
+        if (parsed == null || !"https".equals(parsed.getScheme()) || !trustedHost) {
+            call.reject("Only trusted YouTube image hosts can be fetched.");
+            return;
+        }
+        ioExecutor.execute(() -> {
+            Request request = new Request.Builder()
+                .url(url)
+                .header("User-Agent", youtubeWebUserAgent())
+                .build();
+            try (Response httpResponse = YOUTUBE_HTTP_CLIENT.newCall(request).execute()) {
+                okhttp3.ResponseBody body = httpResponse.body();
+                String contentType = httpResponse.header("Content-Type", "image/jpeg");
+                if (!httpResponse.isSuccessful() || body == null) {
+                    call.reject("Image fetch failed: HTTP " + httpResponse.code());
+                    return;
+                }
+                if (contentType == null || !contentType.startsWith("image/")) {
+                    call.reject("The response was not an image.");
+                    return;
+                }
+                byte[] bytes = body.bytes();
+                if (bytes.length > 512 * 1024) {
+                    call.reject("The image is too large to store.");
+                    return;
+                }
+                JSObject result = new JSObject();
+                result.put("dataUrl", "data:" + contentType.split(";")[0].trim()
+                    + ";base64," + Base64.encodeToString(bytes, Base64.NO_WRAP));
+                call.resolve(result);
+            } catch (IOException error) {
+                call.reject("Image fetch failed: " + error.getMessage());
+            }
         });
     }
 
