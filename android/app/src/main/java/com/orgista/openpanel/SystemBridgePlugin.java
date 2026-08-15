@@ -180,6 +180,23 @@ public class SystemBridgePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void showKeyboard(PluginCall call) {
+        // WebView does not raise the IME for programmatic focus() (only a real
+        // touch does), so admin fields that auto-focus never showed a keyboard.
+        // Force it for the currently focused field.
+        getActivity().runOnUiThread(() -> {
+            View target = getBridge().getWebView();
+            InputMethodManager keyboard = (InputMethodManager) getContext()
+                .getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (keyboard != null && target != null) {
+                target.requestFocus();
+                keyboard.showSoftInput(target, InputMethodManager.SHOW_IMPLICIT);
+            }
+            call.resolve();
+        });
+    }
+
+    @PluginMethod
     public void setKeepScreenOn(PluginCall call) {
         boolean enabled = call.getBoolean("enabled", false);
         getActivity().runOnUiThread(() -> {
