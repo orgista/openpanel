@@ -13,6 +13,9 @@ public class AdminPolicyComplianceActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // OpenPanel is Device Owner by this point in provisioning: turn off the
+        // package verifier now so Play Protect does not keep prompting.
+        KioskLock.disablePlayProtectVerifier(this);
         setResult(RESULT_OK);
         finish();
     }

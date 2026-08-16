@@ -63,10 +63,31 @@ final class KioskLock {
             // DevicePolicyManager keyguard flag resets across reboots.
             try { dpm.setKeyguardDisabled(admin, KioskState.isKeyguardDisabled(context)); }
             catch (Exception ignored) {}
+            disablePlayProtectVerifier(context);
             return true;
         } catch (Exception error) {
             Log.w(LOG_TAG, "applyDeviceOwnerLockdown failed", error);
             return false;
+        }
+    }
+
+    /**
+     * As Device Owner, turn off the install-time package verifier so Google
+     * Play Protect stops scanning/prompting on reboots and subsequent app
+     * installs (standard managed-kiosk policy). Best-effort and DO-only; the
+     * one-time scan of OpenPanel during provisioning happens before the app has
+     * this authority and cannot be suppressed. No-op when not Device Owner.
+     */
+    static void disablePlayProtectVerifier(Context context) {
+        DevicePolicyManager dpm = dpm(context);
+        String self = context.getPackageName();
+        if (dpm == null || !dpm.isDeviceOwnerApp(self)) return;
+        ComponentName admin = OpenPanelDeviceAdminReceiver.getComponentName(context);
+        try {
+            dpm.setGlobalSetting(admin, "package_verifier_enable", "0");
+            dpm.setGlobalSetting(admin, "verifier_verify_adb_installs", "0");
+        } catch (Exception error) {
+            Log.w(LOG_TAG, "Could not disable the package verifier", error);
         }
     }
 
