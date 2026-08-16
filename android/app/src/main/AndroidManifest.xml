@@ -150,6 +150,27 @@
             </intent-filter>
         </receiver>
 
+        <!-- Android 12+ setup-wizard QR/managed provisioning handlers. Without
+             these the wizard aborts Device Owner enrollment on modern Android. -->
+        <activity
+            android:name=".ProvisioningModeActivity"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <intent-filter>
+                <action android:name="android.app.action.GET_PROVISIONING_MODE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".AdminPolicyComplianceActivity"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <intent-filter>
+                <action android:name="android.app.action.ADMIN_POLICY_COMPLIANCE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <!-- Opt-in bottom-swipe Home fallback for managed tablets. -->
         <service
             android:name=".HomeGestureAccessibilityService"

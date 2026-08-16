@@ -51,6 +51,33 @@ If the setup wizard does not expose managed QR enrollment, use the supported
 EMM/DPC workflow for that device or the ADB development procedure above. An
 installed Android app cannot promote itself to Device Owner.
 
+As of 1.1.43 the app declares the Android 12+ provisioning handlers
+(`GET_PROVISIONING_MODE`, `ADMIN_POLICY_COMPLIANCE`) the setup wizard requires;
+earlier builds abort QR enrollment on modern Android.
+
+### QR payload
+
+```json
+{
+ "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME":
+   "com.orgista.openpanel/com.orgista.openpanel.OpenPanelDeviceAdminReceiver",
+ "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": "<HTTPS APK URL>",
+ "android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM": "<base64url of signing-cert SHA-256>",
+ "android.app.extra.PROVISIONING_LEAVE_ALL_SYSTEM_APPS_ENABLED": true
+}
+```
+
+- Checksum for the production key (cert `94323ad0…`):
+  `lDI60CvhV8aBJgXvlw9BPy8Vcet7I83IkkH4EW6Zuww` — derive with
+  `echo <cert-sha256-hex> | xxd -r -p | base64 | tr '+/' '-_' | tr -d '='`.
+- For the download URL, the ArborXR version `downloadUrl`
+  (`GET /api/v3/apps/{appId}/versions`) works; it is a signed link that can
+  expire, so regenerate the QR if the wizard reports a download failure.
+- Render the minified JSON as a QR (any generator; error correction M).
+- Enrollment: factory-reset target → tap the welcome screen six times → join
+  Wi-Fi when prompted → scan → the wizard downloads the APK, verifies the
+  checksum, and sets OpenPanel as Device Owner.
+
 ## Fire tablets
 
 Fire builds force OpenPanel into standalone mode. They use the protected Amazon
