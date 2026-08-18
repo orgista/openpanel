@@ -39,6 +39,11 @@
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
+    <!-- Re-arms the standalone/Fire redirect kiosk after a reboot. Without this
+         nothing brings OpenPanel back: Fire OS boots into the Amazon launcher and
+         the accessibility redirect only ever fired from window-change events. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- Fully-style kiosk "special app access". These are user-toggled in
          Settings (OpenPanel deep-links each screen); declaring them makes the
          grant available. Signature/privileged ops are ignored by lint since a
@@ -133,6 +138,18 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity-alias>
+
+        <!-- Re-arms the standalone kiosk after a reboot. Only acts when the
+             operator already enabled kiosk and OpenPanel still owns the HOME
+             alias, so Exit Kiosk survives a restart unchanged. -->
+        <receiver
+            android:name=".KioskBootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Standalone kiosk device-admin receiver (opt-in; companion/ArborXR
              builds simply never enable it). -->

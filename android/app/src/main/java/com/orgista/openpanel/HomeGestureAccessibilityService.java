@@ -19,6 +19,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 
 import java.lang.reflect.Method;
@@ -39,6 +40,9 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
     private static final long FIRE_LAUNCHER_REDIRECT_DEBOUNCE_MS = 500;
     private static final long SHADE_COLLAPSE_DEBOUNCE_MS = 400;
     private static final long[] TRANSITION_POLICY_DELAYS_MS = {250, 1_000, 3_000};
+    // Post-boot the active window is not queryable the instant the service binds, and
+    // Fire OS can re-show its launcher once more as boot settles.
+    private static final long[] FOREGROUND_AUDIT_DELAYS_MS = {750, 2_500, 6_000};
 
     private WindowManager windowManager;
     private View homeHandle;
@@ -60,6 +64,67 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
         addShadeGuard();
         syncShadeGuardVisibility(getPackageName());
         Log.i(LOG_TAG, "Home gesture and system-UI protection service connected");
+        scheduleForegroundWindowAudit();
+    }
+
+    /**
+     * After a reboot Fire OS settles on its own launcher before this service binds, so
+     * no window-state-change event ever arrives for it and the redirect in
+     * {@link #onAccessibilityEvent} never runs. Evaluate whatever is already in front
+     * when we connect, retrying briefly because the active window is not always
+     * queryable the instant the service binds.
+     */
+    private void scheduleForegroundWindowAudit() {
+        for (long delayMs : FOREGROUND_AUDIT_DELAYS_MS) {
+            policyHandler.postDelayed(this::auditForegroundWindow, delayMs);
+        }
+    }
+
+    private void auditForegroundWindow() {
+        String windowPackage = activeWindowPackage();
+        if (windowPackage == null || getPackageName().equals(windowPackage)) return;
+        if (!FireLauncherRedirect.shouldRedirect(
+                windowPackage,
+                KioskState.getMode(this),
+                isOpenPanelHomeEnabled(),
+                foreignHomePackage())) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastFireLauncherRedirectMs < FIRE_LAUNCHER_REDIRECT_DEBOUNCE_MS) return;
+        lastFireLauncherRedirectMs = now;
+        setHandleVisible(false, windowPackage);
+        Log.i(LOG_TAG, "Foreground launcher found on connect (" + windowPackage
+            + "); returning to standalone OpenPanel");
+        returnToOpenPanel();
+    }
+
+    private String activeWindowPackage() {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) return null;
+            CharSequence packageName = root.getPackageName();
+            return packageName == null ? null : packageName.toString();
+        } catch (RuntimeException error) {
+            Log.w(LOG_TAG, "Could not read the active window package", error);
+            return null;
+        }
+    }
+
+    /**
+     * The device's default HOME package when it is not OpenPanel, otherwise null.
+     *
+     * <p>Fire OS only. This exists because Fire's home package name varies across
+     * generations, so the exact-name set alone can miss it. Generic Android keeps its
+     * previous behaviour — OpenPanel does not bounce a user off an OEM launcher that
+     * Android still treats as the default — so this returns null off Fire.
+     */
+    private String foreignHomePackage() {
+        if (!LandscapeOrientationLock.isFireDevice(Build.MANUFACTURER, Build.BRAND)) return null;
+        String home = DeviceAccess.resolvedHomePackage(this);
+        if (home == null) return null;
+        if (getPackageName().equals(home) || PRODUCTION_PACKAGE.equals(home)) return null;
+        return home;
     }
 
     @Override
@@ -95,7 +160,8 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
         if (FireLauncherRedirect.shouldRedirect(
                 windowPackage,
                 managementMode,
-                homeEnabled)) {
+                homeEnabled,
+                foreignHomePackage())) {
             long now = SystemClock.elapsedRealtime();
             if (now - lastFireLauncherRedirectMs >= FIRE_LAUNCHER_REDIRECT_DEBOUNCE_MS) {
                 lastFireLauncherRedirectMs = now;
@@ -137,7 +203,8 @@ public final class HomeGestureAccessibilityService extends AccessibilityService 
 
     @Override
     public void onDestroy() {
-        policyHandler.removeCallbacks(transitionPolicy);
+        // Clears the transition policy and any pending foreground-window audits.
+        policyHandler.removeCallbacksAndMessages(null);
         removeOverlays();
         super.onDestroy();
     }
