@@ -1,92 +1,494 @@
 # OpenPanel
 
+**The single source of truth for this repository.** The shared product overview plus the Google TV and Amazon Fire OS platform profiles all live in this one file.
+
+> The React/Vite UI lives in the separate **openpanel-ui** repository, checked out at `src/` with its own `README.md` and MIT license. That boundary is deliberate (open-core split) — do not merge the two documents.
+
+## What OpenPanel is
+
+A managed **kiosk launcher** for Android tablets, Google TV, and XR headsets (Meta Quest, Pico, Vive Focus, Lenovo, …). One adaptive app presents an approved catalog of apps, approved YouTube videos/channels/playlists, and an offline books/audiobooks shelf with standards-based institutional catalogs — and confines the device to that approved surface.
+
+## Contents
+
+0. [Working in this repo as an agent](#working-in-this-repo-as-an-agent) — read first if you are a model or a new engineer
+1. [Mobile, tablet, and XR (shared product baseline)](#mobile-tablet-and-xr)
+2. [Google TV and Android TV](#google-tv-and-android-tv)
+3. [Amazon Fire OS](#amazon-fire-os)
+
+---
+
+## Working in this repo as an agent
+
+Written 2026-08-17 so that a smaller model (Sonnet, Kimi, GLM, DeepSeek, …) or a
+new engineer can take a scoped task and finish it without breaking a build or a
+device. This is the contract; the rest of this README is the reference. If you
+only read one section, read this one and then run the verification commands.
+
+### 1. Two repositories, one checkout
+
+| Path | What it is | Commit here for |
+|---|---|---|
+| `./` (this repo, **openpanel**) | Android engine: Capacitor host, native Java/Kotlin under `android/`, build/deploy scripts, this README | Anything under `android/`, `scripts/`, `package.json`, root config |
+| `./src/` (**openpanel-ui**, its own `.git`) | The React/Vite UI. Git-ignored by the outer repo (`.gitignore` line `/src/`) | Anything under `src/` |
+
+`git status` at the root will never show `src/` changes. Run `git -C src status`
+too. Never try to add `src/` to the outer repo, and never merge the two READMEs.
+
+### 2. "All builds" means one codebase with runtime branches
+
+There are **no Gradle product flavors** and no per-device forks. One APK is built;
+behaviour differs by the `deviceProfile` object the native side reports
+(`SystemBridgePlugin.getDeviceProfile()`, consumed throughout `src/app`):
+
+| Build people talk about | Distinguishing profile flags | Notes |
+|---|---|---|
+| Mobile / tablet (ArborXR companion **or** standalone) | `isTablet` / `isHandheld`, `touchUi`, `isStandalone` prop | Baseline behaviour |
+| Google TV / Android TV | `isTelevision`, `remoteUi`, `hasDpad`; `sdk <= 28` = legacy TV | D-pad focus, collapsed Wi-Fi list, no backdrop blur on legacy |
+| Amazon Fire OS | `isFireOs` (from `LandscapeOrientationLock.isFireDevice`) | Fire OS owns Wi-Fi (system picker); app is **not** Device Owner there |
+| Debug vs release | package `com.orgista.openpanel.debug` vs `com.orgista.openpanel` | Different signing keys — see §5 |
+
+So a fix in a shared component (for example `src/app/components/SettingsModal.tsx`)
+lands on every build **unless it sits inside a `deviceProfile` branch**. When a
+task says "on all builds", check each branch of the flags above, not separate
+files.
+
+### 3. Verify before you report — these are the gates
+
+From the repo root, in this order. All three must pass on a clean tree before a
+UI or shared change is "done":
+
+```sh
+npm run typecheck      # tsc --noEmit — covers src/ via tsconfig "include": ["src"]
+npm test               # vitest run — src/**/*.test.{ts,tsx}
+npm run build          # vite build
+```
+
+Android native change? Add:
+
+```sh
+npm run verify:versions                    # package.json vs android/app/build.gradle
+bash scripts/gradle-local.sh :app:testDebugUnitTest   # JDK 21 required
+```
+
+The Android *build directory cannot live on the SMB share* — packaging fails late
+with `Unable to delete directory … packageDebug/tmp`. Use `scripts/gradle-local.sh`
+for tests/lint, and the local-disk copy recipe in
+[Build environment and known environment traps](#build-environment-and-known-environment-traps)
+for `assembleDebug`/`assembleRelease`. Do not "fix" that by moving `build/` in
+Gradle config.
+
+### 4. Definition of done for a scoped task
+
+- The change is the **minimum** that satisfies the task. No drive-by refactors,
+  renames, dependency additions, or formatting sweeps.
+- Existing tests updated, and a test added for the behaviour you changed
+  (pattern: `renderToStaticMarkup(<Component …/>)` + string assertions, see
+  `src/app/components/*.test.tsx`).
+- Gates in §3 pass. Say which you ran and the pass/fail result. If a gate fails
+  for a pre-existing reason unrelated to your change, say so explicitly.
+- UX copy follows house style: plain, short, no em dashes, no "AI-tell" phrasing.
+- **Do not commit or push unless the task says to.** Leave the diff in the tree
+  and report `git status` + `git -C src status`. Never bump the version numbers as
+  part of a feature; releases are separate commits (`release: bump to x.y.z`).
+- Report in this shape: `Done` (item → files → how) / `Not done` (item → why) /
+  `Gates run` / `Notes for the reviewer`.
+
+### 5. Do-not-touch unless the task is explicitly about it
+
+- **Signing and keys**: `private/`, `*.keystore`, `~/.android/debug.keystore`,
+  `scripts/build-release-keychain.sh`, `scripts/arborxr-cli-keychain.sh`. The Fire
+  tablet can only be upgraded by the Mac Studio's debug key
+  (`11b408c4…36f8`); a wrong key strands the device.
+- **Deploy scripts** (`scripts/deploy-*.sh`, `configure-arborxr-token.command`)
+  and `.github/workflows/`. Never run a deploy or `adb install` unless asked.
+- **`android/local.properties`** — shared across machines through the NAS; only
+  repoint `sdk.dir` when you are actually building on this machine.
+- **Kiosk safety code**: `MainActivity` lock-task handling, `KioskLock`,
+  `KioskBootReceiver`, `OpenPanelDeviceAdminReceiver`, `ProvisioningModeActivity`,
+  `SystemBridgePlugin.requireKioskAdmin()` and every method it guards
+  (`enableKioskLock`, `disableKioskLock`, `exitKioskToSystemHome`,
+  `clearDeviceOwner`), `HomeGestureAccessibilityService`, `FireLauncherRedirect`.
+- **Device policy lists**: `DebloatCatalog`, `NotificationBlockPolicy`,
+  `SafeBrowserPolicy`, `KioskVolumePolicy`.
+- `artifacts/` (built APKs are evidence, not scratch), `Samples/`,
+  `android/app/src/main/assets/public` (generated by `npx cap sync`).
+
+### 6. Admin gating — the one rule to internalise
+
+The kiosk has two levels: **guest** (`isAdmin === false`) and **admin** (PIN
+verified, `isAdmin === true`). The principle that decides which side an action
+belongs on:
+
+> Anything **destructive**, **persistent for other users**, or that **leaves the
+> kiosk surface** (opens Android Settings, calls `unpinIfPinned()`, exits kiosk) is
+> admin-only. Anything additive and reversible that a guest needs to use the
+> device may be guest-allowed.
+
+Concretely: forgetting a Wi-Fi network, unpairing Bluetooth, turning radios off,
+opening full system settings, exiting kiosk, changing the catalog → admin.
+Scanning, joining a network, pairing a controller → may be guest (see the
+Settings section for the current policy). When you relax a gate, keep the
+admin-only controls admin-only in the **same** component and add a test that
+renders with `isAdmin={false}` and asserts the destructive control is absent.
+
+The native layer only enforces admin for kiosk-lock/Device-Owner methods (via
+`adminToken`); every other gate lives in the UI. That is deliberate — the UI is
+the policy layer for connectivity — so a UI-only change is the correct shape for
+a gating change.
+
+### 7. Where things are
+
+- Settings modal (Wi-Fi/Bluetooth/admin footer): `src/app/components/SettingsModal.tsx`
+- Admin panel: `src/app/components/AdminPanel.tsx`; PIN pad: `PinInput.tsx`
+- Native bridge (TS side): `src/app/native/SystemBridge.ts`; Java side:
+  `android/app/src/main/java/com/orgista/openpanel/SystemBridgePlugin.java`
+- App shell/state: `src/app/App.tsx`
+- Device profile / Fire detection: `SystemBridgePlugin.getDeviceProfile()`,
+  `LandscapeOrientationLock.isFireDevice()`
+- Per-platform behaviour and device state: the platform sections below and
+  [Fire tablet handoff](#fire-tablet-handoff--open-work-as-of-2026-08-17)
+
+---
+
+## Mobile, tablet, and XR
+
+## OpenPanel — Mobile & Tablet
+
 A managed **kiosk launcher** for Android tablets, Google TV, and XR headsets
 (Meta Quest, Pico, Vive Focus, Lenovo, …). One adaptive app presents an approved
-catalog of apps and approved YouTube videos, channels, and playlists, and
-an offline books/audiobooks shelf with standards-based institutional catalogs,
-confines the device — either
-alongside **ArborXR** (companion mode) or on its own (standalone kiosk).
+catalog of apps, approved YouTube videos/channels/playlists, and an offline
+books/audiobooks shelf with standards-based institutional catalogs, and confines
+the device — either alongside **ArborXR** (companion mode) or on its own
+(standalone kiosk).
+
+This is the **primary/base document** for the project. Device-specific behaviour
+lives in two companion sections below:
+
+- [the Google TV section](#google-tv-and-android-tv) — Google TV / Android TV / Leanback.
+- [the Fire OS section](#amazon-fire-os) — Amazon Fire OS tablets.
 
 - **Package:** `com.orgista.openpanel`
 - **One APK, all form factors:** phone/tablet (`LAUNCHER`), Google TV
   (`LEANBACK_LAUNCHER` + banner), and XR headsets (touchscreen not required, runs
   as a 2D panel — the most compatible XR approach across every ArborXR-managed
   headset).
+- **Min SDK 24 / compile & target SDK 36**, landscape.
+
+### Management modes
+
+Auto-detected on first run:
+
+- **Companion** — ArborXR is the Device Owner and handles lockdown; OpenPanel is
+  the launcher UI on compatible non-Fire devices. Auto-selected when
+  `app.xrdm.client` is the Device Owner.
+- **Standalone** — OpenPanel becomes the HOME launcher and locks the device
+  itself (device admin + lock task / screen pinning) for setups without ArborXR.
+- **Fire OS** — always forced to standalone Home/accessibility redirection;
+  ArborXR and Device Owner enrollment are not offered. See
+  [the Fire OS section](#amazon-fire-os).
+
+### Feature summary
+
 - **Restricted YouTube sources:** admins can approve individual videos,
   playlists, canonical channel URLs, modern `@handle` channel URLs, and legacy
   channel usernames without configuring a YouTube API key. Channel names and
   handles are verified to a canonical channel ID before they can be added.
   Channel tiles open a recent-video browser backed by YouTube's public channel
   feed, allowing the user to choose a video before it opens in the restricted
-  privacy-domain player.
-- **Google TV controls:** the app detects TV/D-pad input, exposes the connected
-  controller in the Admin Panel, uses a keyboard-free remote PIN keypad, and
-  delegates speech recognition to the system Google TV/Gboard experience
-  without requesting microphone permission.
-- **Device Health:** detects the device manufacturer/model and Android version,
-  reports live RAM and storage use, and applies a conservative OEM-aware
-  debloat policy in standalone Device Owner mode. Package changes are hidden
-  reversibly and can be restored from the Admin Panel. Notification management
-  is enabled by default on Android 13+ and restores only grants previously
-  changed by OpenPanel. See
-  [`docs/device-health-debloater.md`](docs/device-health-debloater.md).
-- **TV DNS & telemetry status:** the TV-only Device Health view detects
-  personalDNSfilter, its active VPN owner, always-on/lockdown state, and Android
-  Private DNS conflicts. Standalone Device Owner installations can keep the
-  filter always-on without risking a network-lockdown outage; ArborXR-managed
-  TVs remain report-only. See [`docs/tv-dns-filter.md`](docs/tv-dns-filter.md).
+  privacy-domain player. Full detail in [the Google TV section](#google-tv-and-android-tv).
+- **Device Health:** detects manufacturer/model and Android version, reports live
+  RAM and storage use, and applies a conservative OEM-aware debloat policy in
+  standalone Device Owner mode. Package changes are hidden reversibly and can be
+  restored from the Admin Panel. Notification management is enabled by default on
+  Android 13+ and restores only grants previously changed by OpenPanel.
 - **Books & Audio:** imports EPUB, PDF, Readium audiobook, MP3, and AAC files;
   reads OPDS 1.2/2.0 catalogs without WebView CORS restrictions; stores
-  publications privately for offline use; and resumes reading/listening with
-  Readium navigators. Open-access and institutional catalogs are added by an
-  administrator after deployment; none are bundled as content defaults.
-  Licensed lending systems still require the institution's authorized
-  authentication/DRM connector. See [`docs/library-opds-readium.md`](docs/library-opds-readium.md).
-- **Forward-compatible Android build:** no maximum Android version is declared;
-  the stable Capacitor 8 toolchain currently compiles and targets API 36 and is
-  designed for Android 17/API 37 runtime compatibility without adopting the
-  preview target SDK in production. API 37 runtime testing remains part of the
-  pre-promotion checklist. See
-  [`docs/android-17-tv-readiness.md`](docs/android-17-tv-readiness.md).
-- **Two management modes**, auto-detected on first run:
-  - **Companion** — ArborXR is the Device Owner and handles lockdown; OpenPanel is
-    the launcher UI on compatible non-Fire devices. (Auto-selected when
-    `app.xrdm.client` is the Device Owner.)
-  - **Standalone** — OpenPanel becomes the HOME launcher and locks the device
-    itself (device admin + lock task / screen pinning) for setups without ArborXR.
-  - **Fire OS** — always uses standalone Home/accessibility redirection; ArborXR
-    and Device Owner enrollment are not offered in the Fire UI. Generic managed
-    provisioning instructions live in
-    [`docs/device-owner-provisioning.md`](docs/device-owner-provisioning.md).
-- **Verified Fire tablet profile:** Fire 7 (2022, 12th Generation), Amazon model
-  `KFQUWI` / codename `quartz`, running Fire OS 8 (Android 11 / API 30). The
-  launcher and every Admin Panel tab are tested in reverse landscape at the
-  device's 1024×552 usable app viewport. Fire builds force the standalone
-  redirect kiosk and omit ArborXR/Device Owner setup. See
-  [`docs/fire-tablet-support.md`](docs/fire-tablet-support.md).
+  publications privately for offline use; resumes reading/listening with Readium
+  navigators.
 - **Child-safe app and web boundary:** storefronts, recovery launchers,
   unrestricted browsers, and background admin utilities can stay installed but
-  never appear as child-facing launcher tiles. Escaped HTTP(S) links can be
-  assigned to OpenPanel's non-catalog Safe Browser, which permits only encrypted
-  `kiddle.co` pages and blocks navigation away from that domain. These rules are
-  shared by Fire, generic Android tablet, TV, and XR builds. See
-  [`docs/child-safe-browser.md`](docs/child-safe-browser.md).
+  never appear as child-facing launcher tiles.
+- **Forward-compatible Android build:** no maximum Android version is declared;
+  the stable Capacitor 8 toolchain compiles and targets API 36 and is designed
+  for Android 17/API 37 runtime compatibility without adopting the preview target
+  SDK in production.
 
-## Open-source structure
+---
 
-OpenPanel is MIT-licensed and split into two source repositories so the native
-engine and launcher UI can be versioned independently:
+### Device Health and debloat policy
 
-- **This repo (public)** — the engine: the Capacitor **native bridge**
-  (`SystemBridgePlugin`: apps, Wi-Fi, Bluetooth, kiosk lock, device admin,
-  ArborXR detection; `LibraryBridgePlugin`: OPDS, downloads, and local imports),
-  the Android project (`android/`), build config, and CI.
-- **The React UI (public MIT mirror)** — the polished launcher UI is maintained
-  separately at `cyberbanksy/openpanel-ui` and mounted at **`src/`**
-  (git-ignored here). See
-  [`docs/open-source-split.md`](docs/open-source-split.md).
+OpenPanel's Device Health engine is an MIT-licensed, auditable Android Device
+Owner policy. The reviewed package catalog lives at
+[`android/app/src/main/java/com/orgista/openpanel/DebloatCatalog.java`](android/app/src/main/java/com/orgista/openpanel/DebloatCatalog.java).
 
-## Build
+#### What it does
+
+- Detects the manufacturer, brand, model, device, product, Android version, and
+  matching policy profile on the device itself.
+- Reports total, available, and used RAM plus internal storage usage.
+- Detects reviewed optional packages using exact package names.
+- Hides packages with `DevicePolicyManager.setApplicationHidden`. Hiding is
+  reversible and does not change Android's read-only system partition.
+- Tracks the packages hidden by OpenPanel and restores only that tracked set.
+- Lets an administrator request Android's ordinary uninstall confirmation for
+  eligible user-installed apps. System apps are hidden, not uninstalled.
+- On Android 13 and later, suppresses `POST_NOTIFICATIONS` for eligible apps when
+  **Manage app notifications** is on. The toggle defaults to on. OpenPanel
+  records only permissions it changes, so turning the toggle off restores that
+  recorded set.
+
+The initial generic policy includes Play Books, Play Games, YouTube, YouTube
+Kids, Kids Space, Keep Notes, Google Wallet/GPay, YouTube Music, Google Feedback,
+and Google Location History. OEM profiles add conservative packages for Lenovo,
+Motorola, Samsung, Xiaomi/Redmi/Poco, OnePlus/Oppo/Realme, Huawei/Honor, and
+Amazon Fire OS. For example, the Lenovo profile includes Lenovo FreeStyle and
+App Explorer.
+
+#### Why it does not run ADB
+
+An ordinary Android app cannot safely run ADB against its own device. ADB is a
+developer/host transport controlled by Android's debugging service; bundling a
+root or local shell workaround would weaken the kiosk security model.
+
+OpenPanel instead uses Android's supported on-device management boundary:
+
+- **OpenPanel Device Owner:** package and notification policy can be applied
+  silently and reversibly through `DevicePolicyManager`.
+- **ArborXR Device Owner:** ArborXR owns the Device Policy Controller slot.
+  OpenPanel detects this state and reports that the equivalent app and
+  notification policy must be configured in ArborXR. Android permits one Device
+  Owner, so OpenPanel does not try to override ArborXR.
+- **Unmanaged/Device Admin only:** health data and recommendations remain
+  visible, but Android will not allow OpenPanel to silently manage other apps.
+
+#### Safety boundaries
+
+The catalog never pattern-matches unknown packages. It hard-protects core
+Android services, Settings, System UI, phone/emergency components, permission
+and package installers, Google Play services/framework, current launchers,
+wallpaper providers, Lenovo OTA/management agents, ArborXR's DPC and launcher,
+and OpenPanel's production/debug packages.
+
+Apps disabled with ADB, an OEM tool, or a different DPC are shown as **Disabled
+outside OpenPanel**. OpenPanel does not claim it can restore changes it did not
+make. Restore actions only reverse the OpenPanel-tracked hidden-package and
+notification sets.
+
+#### Adding or reviewing a package
+
+1. Confirm the package name on a device you own or are authorized to manage.
+2. Identify the exact user-facing purpose and the applicable OEM profile.
+3. Verify it is not required for boot, setup, emergency use, the launcher,
+   wallpaper, OTA, accessibility, permissions, or device management.
+4. Add one exact `rule(...)` entry to `DebloatCatalog.java`.
+5. Add or update a unit test in
+   `android/app/src/test/java/com/orgista/openpanel/DebloatCatalogTest.java`.
+6. Run `./scripts/gradle-local.sh :app:testDebugUnitTest :app:lintDebug` and test
+   hide plus restore on the applicable device before promotion.
+
+---
+
+### Child-safe app and browser boundary
+
+OpenPanel applies the same child-facing catalog policy on Fire OS, generic
+Android tablets, Google TV, and XR. Stores and device-management utilities can
+remain installed and enabled for updates or administration without becoming
+launcher tiles.
+
+#### Packages hidden from the child catalog
+
+The native and React catalogs use the same exact-package policy. It covers
+Aurora Store, F-Droid, Google Play, Amazon Appstore, common OEM stores,
+unrestricted browsers, Nova Launcher, personalDNSfilter, and Shizuku. These
+packages are not uninstalled and are not shown in either the allowed or
+available child-app grids. personalDNSfilter can continue running as the VPN/DNS
+filter, and stores can continue their administrator-configured update jobs.
+
+The Device Health debloat policy separately offers reversible hiding for exact,
+reviewed packages such as Chrome, Firefox, Gallery, Photos, the stock Camera,
+Calendar, Contacts, Clock, Email, Music, and the Fire Silk components. Core
+Settings, WebView, networking, DocumentsUI, OTA, device policy, System UI,
+OpenPanel, and fallback OEM launcher packages remain protected.
+
+#### Safe Browser
+
+`SafeBrowserActivity` handles escaped `http` and `https` links without declaring
+a launcher category, so it is never an OpenPanel tile. Its controls expose only
+Back, Kiddle Home, and Close. The WebView:
+
+- permits only HTTPS URLs whose host is `kiddle.co` or a subdomain;
+- blocks navigation away from Kiddle instead of trusting the destination page;
+- rejects off-domain page resources as well as off-domain top-level links;
+- disables JavaScript, cookies, DOM/database storage, downloads, geolocation,
+  file/content access, pop-ups, new windows, and web permission grants;
+- rejects TLS errors and returns to safety on a Safe Browsing hit;
+- sends Close and root-level Back directly to the OpenPanel launcher.
+
+Kiddle describes itself as a kid-oriented search service, but also warns that
+filtering is weaker after leaving its results. OpenPanel therefore does not let
+the fallback browser follow external result links. This is a strict escape
+containment browser, not a guarantee that every Kiddle page is appropriate for
+every four-year-old; an adult should still curate normal OpenPanel content.
+
+#### Assigning the browser role
+
+On an authorized development device, assign the debug build with:
+
+```sh
+adb shell cmd role add-role-holder --user 0 \
+  android.app.role.BROWSER com.orgista.openpanel.debug
+```
+
+Use `com.orgista.openpanel` for a signed production build. Managed deployments
+should assign the Android browser role through their DPC. If a platform does not
+expose roles, an administrator can select OpenPanel Safe Browser from its
+default-app UI after opening an HTTP(S) link.
+
+#### Reversible device cleanup
+
+Managed generic Android deployments should use Admin Panel → Device Health so
+OpenPanel can hide and restore reviewed packages through Android policy. On an
+ADB-authorized Fire tablet, exact packages may be disabled for user 0 with
+`pm disable-user --user 0 PACKAGE` and restored with `pm enable PACKAGE`. Never
+disable packages outside the reviewed catalog or the protected system boundary.
+
+---
+
+### Books & Audio for libraries and public institutions
+
+OpenPanel's library feature is designed around open publishing standards rather
+than one commercial vendor. It uses the BSD-3-Clause-licensed Readium Kotlin
+Toolkit for EPUB, PDF, packaged audiobooks, and standalone audio, and supports
+OPDS 1.2 and OPDS 2.0 catalogs for discovery and acquisition.
+
+#### Supported workflows
+
+- Import local EPUB, PDF, Readium audiobook, MP3, M4A/M4B, or AAC files with
+  Android's system file picker.
+- Configure HTTPS OPDS catalogs during setup or in **Admin Panel → Books &
+  Audio**.
+- Browse approved catalogs from the launcher and download compatible
+  open-access publications into OpenPanel's app-private storage.
+- Read EPUBs with font-size, light/dark theme, touch-edge, keyboard, and D-pad
+  navigation.
+- Read PDFs with Readium's PDFium navigator.
+- Play audiobooks with play/pause, 30-second skip, seeking, media-volume
+  routing, and saved position.
+- Resume the most recently opened publication from its stored Readium Locator.
+
+OpenPanel does not bundle or preconfigure a catalog. Administrators may add
+Project Gutenberg or their library's own approved OPDS endpoint after deployment
+without modifying the app.
+
+#### Lending, authentication, and DRM boundary
+
+OPDS is a discovery/acquisition protocol, not a universal library account. A
+catalog entry may advertise a loan, but OpenPanel does not collect patron
+credentials or attempt to bypass DRM. Palace, Libby/OverDrive, Hoopla,
+cloudLibrary, and similar licensed collections must use an integration and
+authentication flow authorized by the library and vendor.
+
+Readium LCP can be added after the deploying institution supplies the licensed
+native `liblcp` integration and completes any required certification. Without
+that connector, OpenPanel clearly reports that a restricted publication needs the
+institution's licensed connector.
+
+#### Security and privacy
+
+- Catalogs and publication downloads must use HTTPS, including redirects.
+- Catalog responses are capped at 5 MB and publication downloads at 1 GB.
+- Files are copied into app-private storage; OpenPanel never grants another app
+  broad storage access.
+- Catalog credentials are not stored in this release.
+- Book metadata and reading positions stay on the device and are excluded from
+  Android backup with the rest of OpenPanel's private data.
+- Deleting a publication removes both its private file and its metadata.
+
+---
+
+### Managed Android provisioning (Device Owner)
+
+OpenPanel keeps managed-device enrollment instructions in the repository rather
+than displaying a provisioning QR on the target device. A QR shown by that tablet
+is unavailable after the factory reset that managed provisioning needs.
+
+These instructions are for compatible generic Android tablets, Google TV, and XR
+deployments. The OpenPanel Fire profile deliberately does not offer ArborXR or
+Device Owner enrollment; use the Fire standalone procedure in
+[the Fire OS section](#amazon-fire-os).
+
+#### Development provisioning with ADB
+
+Android only accepts a Device Owner while the device has no accounts and is not
+already managed. Use a fresh test device or remove accounts and users as allowed
+by that device's Android build, install the intended APK, then run exactly one of
+these commands from an authorized workstation:
+
+```sh
+# Debug build
+adb shell dpm set-device-owner \
+  com.orgista.openpanel.debug/com.orgista.openpanel.OpenPanelDeviceAdminReceiver
+
+# Signed production build
+adb shell dpm set-device-owner \
+  com.orgista.openpanel/com.orgista.openpanel.OpenPanelDeviceAdminReceiver
+```
+
+Verify the result before deployment:
+
+```sh
+adb shell dpm list-owners
+adb shell dumpsys device_policy
+```
+
+Do not run `set-device-owner` against a personal device or a tablet that already
+contains user data. Removing Device Owner changes device-management state and a
+failed or incompatible provisioning attempt can require another factory reset.
+
+#### QR enrollment on compatible generic Android
+
+If a supported device uses Android's setup-wizard QR enrollment, create and save
+the enrollment QR on a separate administrator computer or phone **before**
+resetting the target. The payload must identify OpenPanel's device-admin
+component, a reachable HTTPS APK download, and the signing-certificate checksum
+for that exact APK. Keep the QR with the deployment record; never rely on a copy
+displayed inside the target app.
+
+QR support is controlled by the device's setup wizard and OEM management stack.
+If the setup wizard does not expose managed QR enrollment, use the supported
+EMM/DPC workflow for that device or the ADB development procedure above. An
+installed Android app cannot promote itself to Device Owner.
+
+As of 1.1.43 the app declares the Android 12+ provisioning handlers
+(`GET_PROVISIONING_MODE`, `ADMIN_POLICY_COMPLIANCE`) the setup wizard requires;
+earlier builds abort QR enrollment on modern Android.
+
+##### QR payload
+
+```json
+{
+ "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME":
+   "com.orgista.openpanel/com.orgista.openpanel.OpenPanelDeviceAdminReceiver",
+ "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": "<HTTPS APK URL>",
+ "android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM": "<base64url of signing-cert SHA-256>",
+ "android.app.extra.PROVISIONING_LEAVE_ALL_SYSTEM_APPS_ENABLED": true
+}
+```
+
+- Checksum for the production key (cert `94323ad0…`):
+  `lDI60CvhV8aBJgXvlw9BPy8Vcet7I83IkkH4EW6Zuww` — derive with
+  `echo <cert-sha256-hex> | xxd -r -p | base64 | tr '+/' '-_' | tr -d '='`.
+- For the download URL, the ArborXR version `downloadUrl`
+  (`GET /api/v3/apps/{appId}/versions`) works; it is a signed link that can
+  expire, so regenerate the QR if the wizard reports a download failure.
+- Render the minified JSON as a QR (any generator; error correction M).
+- Enrollment: factory-reset target → tap the welcome screen six times → join
+  Wi-Fi when prompted → scan → the wizard downloads the APK, verifies the
+  checksum, and sets OpenPanel as Device Owner.
+
+---
+
+### Build
 
 The full APK build needs the UI repository present at `src/`. With it in place:
 
@@ -99,54 +501,260 @@ npx cap sync android     # copy the web bundle + plugins into the native project
 ./scripts/gradle-local.sh :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
-Android native compilation requires JDK 21. Java 17 fails Capacitor's source
-level 21, and newer JDKs can fail Android's `jlink` transform. Set `JAVA_HOME`
-to a real JDK 21 install before running Gradle locally.
+Android native compilation requires **JDK 21**. Java 17 fails Capacitor's source
+level 21, and newer JDKs can fail Android's `jlink` transform. Set `JAVA_HOME` to
+a real JDK 21 install before running Gradle locally. On macOS, Android Studio's
+bundled JBR is a convenient JDK 21:
+`/Applications/Android Studio.app/Contents/jbr/Contents/Home`.
+
+The repo lives on an SMB share that can break Gradle locking/cleanup, so use the
+local helper (which puts Gradle caches on local temporary storage), a local-disk
+checkout, or CI for release builds.
+
+Debug builds are signed with the standard Android debug key — fine for dev, never
+trusted for production updates.
 
 The engine CI (`.github/workflows/android.yml`) runs native tests, lint, debug
 assembly, and instrumentation-test compilation. The protected manual release
-verification workflow checks out an explicitly pinned UI revision and
-builds a signed APK with external signing inputs, then verifies its package,
-SDK range, TV eligibility, and exact production signing-certificate digest.
-`android/app/build.gradle` refuses release tasks unless
-`OPENPANEL_KEYSTORE_FILE`, `OPENPANEL_KEYSTORE_PASS`,
-`OPENPANEL_KEY_ALIAS`, and `OPENPANEL_KEY_PASS` are provided from CI or a secret
-manager.
+verification workflow checks out an explicitly pinned UI revision and builds a
+signed APK with external signing inputs, then verifies its package, SDK range, TV
+eligibility, and exact production signing-certificate digest.
+`android/app/build.gradle` refuses release tasks unless `OPENPANEL_KEYSTORE_FILE`,
+`OPENPANEL_KEYSTORE_PASS`, `OPENPANEL_KEY_ALIAS`, and `OPENPANEL_KEY_PASS` are
+provided from CI or a secret manager. The signing preflight is wired into
+APK/bundle packaging tasks: a release build with missing signing inputs fails
+instead of falling through to an unsigned APK.
 
-The signing preflight is wired into APK/bundle packaging tasks. A release build
-with missing signing inputs fails instead of falling through to an unsigned APK.
+#### Release signing
 
-### Verified Fire build
+Release signing material is **not** stored in this repo. Release packaging tasks
+require external signing inputs and fail instead of producing an unsigned APK:
 
-| OpenPanel | Fire tablet | Fire OS / Android | Orientation and usable viewport | Local debug artifact |
-| --- | --- | --- | --- | --- |
-| 1.1.31 (40) | Fire 7 (2022, 12th Gen), `KFQUWI` / `quartz` | Fire OS 8, Android 11 (API 30), build `RS8338.3339N` | Reverse landscape, 1024×552 | `openpanel-1.1.31-fire7-12thgen-kfquwi-debug.apk` |
+- `OPENPANEL_KEYSTORE_FILE`
+- `OPENPANEL_KEYSTORE_PASS`
+- `OPENPANEL_KEY_ALIAS`
+- `OPENPANEL_KEY_PASS`
 
-APK files stay ignored and are not committed to source control. Release APKs
-must be reproduced by the signed release workflow. The local debug artifact is
-only an installation/test result for the authorized physical tablet.
+For CI, store the keystore as `RELEASE_KEYSTORE_BASE64`, decode it into a runner
+temp file, and export `OPENPANEL_KEYSTORE_FILE` to that path before running
+`./gradlew assembleRelease`. For local signing, use the ignored, owner-only NAS
+file at `private/signing/openpanel-production.keystore` and retrieve its password
+from macOS Keychain. The old `openpanel-upload.keystore` file and its
+compatibility symlink are retained only as legacy records; they cannot sign
+releases made with the replacement key.
 
-## Storage
+Keep the upload key stable and managed in a secret manager / offline signer:
+Android rejects updates signed by a different key. Keystores are git-ignored
+(`*.keystore`); never commit one.
 
-The canonical project—including the engine and `src/` UI repository—lives in
-this single NAS folder. OpenPanel's local Gradle helper uses
-an automatically cleaned temporary cache because Gradle file locking is not
-supported by the SMB share. See [`docs/storage-layout.md`](docs/storage-layout.md)
-and run `npm run storage:audit` to verify the layout. Ignored private records,
-the local upload keystore, and project-specific agent history are consolidated
-under `private/`; their legacy paths are compatibility symlinks.
+The legacy signing password appeared in local agent history and was redacted. The
+replacement production key uses a distinct password stored in Keychain and in an
+independent owner-controlled recovery vault. Never copy signing passwords into
+documentation, tickets, chat, or command output.
 
-## Deploy
+Before upload, verify the produced APK:
+
+```sh
+apksigner verify --print-certs android/app/build/outputs/apk/release/app-release.apk
+aapt dump badging android/app/build/outputs/apk/release/app-release.apk | grep -E "package:|sdkVersion|targetSdkVersion"
+```
+
+For local releases, `scripts/build-release-keychain.sh` retrieves the password
+from macOS Keychain, runs native tests and lint, builds the signed APK, verifies
+its identity, and writes a SHA-256 checksum without exposing the password in
+shell history or Gradle properties.
+
+CI secret setup:
+
+```sh
+PASS="$(security find-generic-password -a openpanel-production-v2 -s "OpenPanel production signing key v2" -w)"
+REPO="orgista/openpanel"
+KEYSTORE="private/signing/openpanel-production.keystore"
+base64 -i "$KEYSTORE" | gh secret set RELEASE_KEYSTORE_BASE64 --repo "$REPO"
+printf '%s' "$PASS"       | gh secret set OPENPANEL_KEYSTORE_PASS --repo "$REPO"
+printf '%s' "$PASS"       | gh secret set OPENPANEL_KEY_PASS      --repo "$REPO"
+printf 'openpanel-production-v2' | gh secret set OPENPANEL_KEY_ALIAS --repo "$REPO"
+```
+
+Set the protected environment variable `OPENPANEL_SIGNING_CERT_SHA256` to the
+production certificate's SHA-256 digest (as printed by `apksigner`) so a wrong or
+rotated key cannot silently produce an incompatible update.
+
+---
+
+### Deploy — ArborXR
 
 For compatible non-Fire devices, upload the signed APK to **ArborXR** and assign
-it to a device/group. On ArborXR-managed devices OpenPanel runs in companion
-mode automatically; on unmanaged devices, use the standalone kiosk flow. Fire
-tablets use the Fire standalone flow and are not ArborXR deployment targets in
-this project. See
-[`docs/arborxr-upload.md`](docs/arborxr-upload.md).
+it to a device/group. On ArborXR-managed devices OpenPanel runs in companion mode
+automatically; on unmanaged devices, use the standalone kiosk flow. Fire tablets
+use the Fire standalone flow and are not ArborXR deployment targets in this
+project.
 
+Use the single existing ArborXR app entry for `com.orgista.openpanel`. Do not
+create a separate app entry or package for debug/testing deployments. All signed
+builds use the production signing lineage and are separated by release channels
+on the same app entry.
 
-## Security
+ArborXR's special `Latest` channel automatically advances when a newer APK is
+uploaded, including an upload explicitly associated with another channel. It must
+therefore not be assigned to production groups when releases require a
+test-before-promotion gate. Use this channel layout instead:
+
+- `Production`: pinned to the last approved build and assigned to production
+  groups.
+- `Debug`: points to the candidate build and is assigned only to named test
+  devices.
+- `Latest`: automatic ArborXR channel; leave it unassigned.
+
+Promote only after device testing passes by changing `Production` to the
+already-uploaded candidate build. Before every upload, audit all group and device
+assignments and fail if `Latest` or `Debug` is assigned outside its intended
+scope.
+
+The guarded release helper enforces that sequence and verifies the APK package,
+version, checksum, signer, release-channel identities, test-device identity, and
+all OpenPanel group/device assignments before it changes remote state:
+
+```sh
+./scripts/deploy-arborxr-beta.sh verify
+./scripts/deploy-arborxr-beta.sh status
+./scripts/deploy-arborxr-beta.sh test-candidate
+./scripts/deploy-arborxr-beta.sh deploy-production
+```
+
+`test-candidate` uploads the exact verified APK if needed, pins `Debug` to that
+checksum-matched build, waits for it on the online, ungrouped `Pink TCL` test
+device, and records the tested build locally under ignored `private/deployment/`.
+`deploy-production` refuses to run unless that exact checksum is recorded as
+tested; it then updates only the existing `Production` channel for `Kids`,
+`Boys`, and `Music`. Offline production devices remain queued for their next
+ArborXR check-in. `./scripts/deploy-arborxr-beta.sh deploy` runs both guarded
+stages in order.
+
+Every update must use the same production key. Android rejects an update signed
+by a different key.
+
+---
+
+### Open-source structure
+
+OpenPanel is MIT-licensed. The native kiosk engine/build tooling and React UI are
+versioned in separate repositories. The public CyberBanksy mirrors are
+**`cyberbanksy/openpanel`** and **`cyberbanksy/openpanel-ui`**. There is a single
+app: the Capacitor app `com.orgista.openpanel` (the legacy AOSP launcher and the
+ArborXR SDK were removed).
+
+| Path | Repo | Notes |
+| --- | --- | --- |
+| `android/` (Capacitor native, `SystemBridgePlugin`, `OpenPanelDeviceAdminReceiver`, manifest, gradle) | **public** `orgista/openpanel` | The kiosk engine + native bridge |
+| `scripts/`, build config (`package.json`, `vite.config.ts`, `capacitor.config.ts`, `tsconfig.json`, `index.html`, `postcss.config.mjs`) | **public** `orgista/openpanel` | The UI builds against these |
+| `.github/workflows/` | **public** `orgista/openpanel` | Engine CI plus protected full-release verification |
+| `src/` (entire React app + TS bridge bindings, styles, assets) | **public** `cyberbanksy/openpanel-ui` | MIT UI source — **git-ignored here** because it is a nested repository |
+
+The UI repo's root maps 1:1 onto `src/` and is excluded here via `.gitignore`
+(`/src/`). To build the full app, clone
+`https://github.com/cyberbanksy/openpanel-ui.git` to `src/`. That keeps `vite`,
+`index.html` → `/src/main.tsx`, and `tsconfig` working unchanged. It can also be
+wired as a git submodule at `src/`:
+
+```sh
+# (first remove the /src/ ignore line from .gitignore)
+git submodule add https://github.com/cyberbanksy/openpanel-ui.git src
+git commit -am "build: add UI submodule at src/"
+git push
+```
+
+Clone for development: `git clone --recurse-submodules <url>`. A public UI needs
+no checkout token. Keep `UI_SUBMODULE_TOKEN` only when a private upstream mirror
+is intentionally selected in CI.
+
+#### What is NOT published (git-ignored)
+
+`/src/` (separate UI checkout), keystores (`*.keystore`), `.env*`, `Samples/`
+(commercial Fully Kiosk APKs — do not redistribute), `*.apk` / `*.zip`, `dist/`,
+`build/`, `node_modules/`, `.toolchains/`, `local.properties`, `guidelines/`
+(design template), and `docs/_archive/` (retired internal/research notes).
+
+Verify before any push: `git ls-files | grep -iE 'keystore|\.env|password|secret'`
+must be empty.
+
+---
+
+### Storage layout
+
+#### Canonical location
+
+All durable OpenPanel data belongs under this NAS folder:
+
+`/Volumes/Files/Projects/Code, Apps & Websites/Apps/OpenPanel`
+
+That folder contains the public engine repository, the private UI repository at
+`src/`, source assets, screenshots, local reference material, documentation, and
+project-specific toolchains. The convenience path at
+`~/Documents/Files/Projects/Apps/OpenPanel` is only a symbolic link to this NAS
+folder; it is not a second copy.
+
+NPM's project cache is configured as `.npm-cache/`, so future package downloads
+remain under the canonical folder. `node_modules/`, build outputs, and other
+generated files also live below the project root when created there.
+
+#### Android build exception
+
+Gradle cannot keep its live cache on this SMB share. macOS reports
+`Operation not supported` when Gradle tries to acquire the native file lock. The
+local helper therefore uses one disposable folder named `openpanel-gradle-cache`
+under macOS's temporary directory. By default it is deleted automatically when
+the build exits.
+
+For repeated local builds, set `OPENPANEL_KEEP_LOCAL_CACHE=1` to retain that
+cache temporarily, then remove it with:
+
+```sh
+npm run storage:clean-local
+```
+
+The Android SDK, JDK, Git credentials, and npm's global installation are shared
+machine tools rather than OpenPanel-owned data. CI signing copies remain in the
+protected CI environment; the local production upload key is stored in the
+ignored, owner-only `private/signing/` area.
+
+Run `npm run storage:audit` to confirm the canonical location and detect
+OpenPanel-named files or folders in common local and temporary locations.
+
+#### Private records
+
+Non-sensitive historical outputs live physically under
+`private/external-records/`. Their former Raster and Unraid paths are symbolic
+links, so those systems can still read the same checksummed files without keeping
+duplicate data.
+
+Strict consolidation places sensitive OpenPanel data in these ignored,
+owner-only locations:
+
+- `private/signing/openpanel-production.keystore` — the active replacement
+  signing key for `com.orgista.openpanel`. Its password is stored in macOS
+  Keychain and in an independent owner-controlled recovery vault.
+- `private/signing/openpanel-upload.keystore` — the inaccessible legacy key.
+  `~/openpanel-upload.keystore` remains a compatibility symlink to this preserved
+  legacy file.
+- `private/agent-state/claude/current/` — current OpenPanel-specific Claude
+  project state.
+- `private/agent-state/claude/archive-20260718/` — archived project state.
+
+Verify redaction without printing the credential:
+
+```sh
+node scripts/redact-openpanel-agent-secrets.mjs --verify
+```
+
+Other products and operations reports may legitimately mention OpenPanel. Those
+cross-project references stay with their owning systems. The storage audit
+enforces consolidation of OpenPanel-owned files and dedicated records, not
+removal of every textual reference to the product.
+
+---
+
+### Security
 
 - No signing keys or secrets in source (keys are git-ignored; release signing
   material lives in CI secrets / a secret manager).
@@ -157,6 +765,1171 @@ this project. See
   Android, emergency, launcher, wallpaper, OTA, DPC/ArborXR, and OpenPanel
   packages. There are no package-name wildcards and no self-ADB or root shell.
 
-## License
+---
+
+### Repository policies
+
+#### Master content configuration policy
+
+OpenPanel must ship with an empty user-content catalog. Never hardcode requested
+apps, package selections, websites, URLs, YouTube videos/channels/playlists,
+library catalogs, media, titles, thumbnails, ordering, or deployment-specific
+content in TypeScript, JavaScript, Java, Kotlin, Android resources, bundled
+assets, build scripts, or production defaults.
+
+When the user asks to add or change deployable content, record every requested
+item in `POST_DEPLOYMENT_CONTENT.txt` instead. That file is a human operations
+checklist only: application code, tests, builds, seeders, and deployment scripts
+must never parse, import, copy, or automatically apply it. Content must be added
+after deployment through OpenPanel's admin UI or the authorized device-management
+workflow, and only to the explicitly requested devices or groups.
+
+For each requested item, record its type, display name, URL or identifier,
+intended target, ordering/metadata requirements, and deployment status. Do not
+put credentials, API keys, tokens, private URLs, or other secrets in the file. If
+OpenPanel has no post-deployment configuration path for a requested item, record
+the gap and report it rather than hardcoding a workaround.
+
+This policy does not prohibit product-owned branding, ordinary interface copy,
+protocol/provider endpoints needed to implement a feature, security allowlists,
+device/package detection policy, or clearly isolated test fixtures that cannot
+enter a production build. These exceptions must not be used to smuggle a
+deployable content catalog into the application.
+
+#### ArborXR upload policy
+
+Agents may build and verify OpenPanel APKs locally without additional
+authorization.
+
+Agents may sign, upload, replace, promote, or deploy an OpenPanel production or
+debug APK to the configured ArborXR tenant only when the user explicitly asks for
+that upload or deployment. Agents must never initiate an external upload or
+deployment merely because a new build is available.
+
+For an explicitly requested deployment, agents may reuse the configured ArborXR
+token and signing material, update the relevant OpenPanel application entry,
+assign the requested existing tablet groups or testing devices, and configure
+OpenPanel as the launcher when requested. This is an exception to the workspace
+rule prohibiting external APK uploads only for that user-requested OpenPanel
+deployment.
+
+Before uploading, agents must verify tests, package identity, version, signature,
+and intended deployment targets. Agents must not expose credentials, delete
+devices or groups, modify unrelated applications, or deploy an unverified build.
+
+---
+
+### License
 
 MIT — see [LICENSE](LICENSE). © 2026 Orgista.
+
+#### Third-party notices
+
+OpenPanel is MIT-licensed. Its Android Books & Audio feature also incorporates
+the following open-source libraries through Maven dependencies:
+
+- **Readium Kotlin Toolkit 3.3.0**, copyright Readium Foundation contributors,
+  licensed under the BSD 3-Clause License:
+  <https://github.com/readium/kotlin-toolkit/blob/3.3.0/LICENSE>
+- **AndroidX Media3**, copyright The Android Open Source Project, licensed under
+  the Apache License 2.0:
+  <https://github.com/androidx/media/blob/release/LICENSE>
+- **PdfiumAndroid**, distributed as a transitive dependency of Readium's PDFium
+  adapter under its published open-source license:
+  <https://github.com/marain87/PdfiumAndroid>
+- **OPDS 2.0 specification** — the interoperable catalog model used by the
+  Books & Audio feature: <https://specs.opds.io/opds-2.0>
+
+The complete dependency graph and each artifact's license metadata remain
+available from the Gradle/Maven coordinates declared in
+`android/app/build.gradle`.
+
+#### UI attributions
+
+The launcher UI includes components from
+[shadcn/ui](https://ui.shadcn.com/) used under the
+[MIT license](https://github.com/shadcn-ui/ui/blob/main/LICENSE.md).
+
+The launcher UI includes photos from [Unsplash](https://unsplash.com) used under
+the [Unsplash license](https://unsplash.com/license).
+
+---
+
+## Build environment and known environment traps
+
+Recorded 2026-08-17 while bringing up a second build machine (`Pro-M4`) alongside
+the original `Mac Studio`. Read this before building on any host that is not the
+machine which produced the currently-installed APKs.
+
+### The debug signing key is project state, not machine state
+
+Android debug builds are signed with a per-machine auto-generated key at
+`~/.android/debug.keystore`. **A second machine generates a different key, and its
+APK cannot upgrade an install produced by the first machine** — `adb install -r`
+fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+
+That is normally solved by uninstalling first. On the Fire tablet it is not; see
+[the Fire uninstall block](#the-debug-key-and-the-uninstall-block).
+
+The key that produced every APK in `artifacts/` and every build installed on the
+Fire tablet has this certificate digest:
+
+```text
+11b408c4319ed4355ef3be99e770566b631bb4ff67eac67e421646a7cf2836f8
+```
+
+Verify a candidate keystore, and an APK, with:
+
+```sh
+keytool -list -v -keystore ~/.android/debug.keystore \
+  -storepass android -alias androiddebugkey | grep -i "SHA256:"
+
+apksigner verify --print-certs <apk> | grep -i "SHA-256 digest"
+```
+
+**Back up the Mac Studio's `~/.android/debug.keystore` alongside the production
+keystore.** Losing it means no existing debug install on a policy-locked device
+can ever be upgraded in place again. A copy made on 2026-08-17 lives at
+`private/macstudio-debug.keystore` (git-ignored, on the NAS).
+
+### `android/local.properties` is shared across machines via the NAS
+
+`local.properties` is git-ignored but it is *not* per-machine here — the checkout
+lives on the SMB share, so the last machine to write `sdk.dir` wins for everyone.
+Building on the Mac Studio after Pro-M4 (or vice versa) fails until it is pointed
+at that host's SDK again:
+
+```sh
+sed -i '' "s|^sdk.dir=.*|sdk.dir=$HOME/Library/Android/sdk|" android/local.properties
+```
+
+`sdk.dir` takes precedence over `ANDROID_HOME`, so setting the environment
+variable alone does not help. Do this before the local-disk copy below.
+
+### Gradle cannot write its build directory to the SMB share
+
+The storage section above notes Gradle's *cache* cannot live on the NAS. The
+per-project `build/` directory has the same limitation, and
+`scripts/gradle-local.sh` relocates only the cache. A build against the NAS
+checkout therefore fails late, at packaging:
+
+```text
+Execution failed for task ':app:packageDebug'.
+> Unable to delete directory '.../build/intermediates/incremental/packageDebug/tmp'
+```
+
+macOS SMB then also refuses `rm -rf` on that directory with `Directory not
+empty`. Compile, unit tests, and lint all pass first, so this reads as a build
+failure when it is really a filesystem failure.
+
+Build from a local-disk copy instead. Only `android/` and
+`node_modules/@capacitor` are needed — about 25 MB:
+
+```sh
+LOCAL=/tmp/op-build
+mkdir -p "$LOCAL/node_modules"
+rsync -a --exclude 'build/' --exclude '.gradle/' android "$LOCAL/"
+rsync -a node_modules/@capacitor "$LOCAL/node_modules/"
+gradle -p "$LOCAL/android" --project-cache-dir /tmp/gradle-pc \
+  --no-daemon :app:assembleDebug
+```
+
+Run `npm run build && npx cap sync android` on the NAS checkout *first*, so the
+web bundle is already staged in `android/app/src/main/assets/public`. The
+alternative is a Gradle init script that sets `project.layout.buildDirectory` to
+a local path, passed with `-I`.
+
+`gradle-local.sh` deletes its cache on exit unless `OPENPANEL_KEEP_LOCAL_CACHE=1`,
+so an interrupted build re-downloads the whole dependency graph next time.
+
+### Google's Maven repository can be blocked by the site's own network policy
+
+Every AndroidX, Capacitor, Media3, and Readium artifact comes from
+`dl.google.com/dl/android/maven2`, and the Android SDK installs from the same
+host. On the deployment LAN this host was intermittently unreachable over both
+IPv4 and IPv6 while `www.google.com` stayed up — which presents as Gradle hanging
+on dependency resolution rather than as an obvious network error.
+
+The cause was a UniFi Traffic Rule, not a Google outage. See
+[UniFi domain rules and Google shared-IP collateral](#unifi-domain-rules-and-google-shared-ip-collateral).
+Diagnose with a direct fetch rather than trusting Gradle's error text:
+
+```sh
+curl -s -o /dev/null -w "%{http_code}\n" \
+  "https://dl.google.com/dl/android/maven2/androidx/core/core/1.17.0/core-1.17.0.pom"
+```
+
+`200` is healthy. `000` is a silent drop, not a refusal.
+
+### Bootstrapping a bare machine
+
+A host with no Android tooling needs, in order: Google `platform-tools` (adb),
+`commandlinetools`, then `sdkmanager --install "platform-tools"
+"platforms;android-36" "build-tools;36.0.0"`, plus Node 22 and JDK 21 (Java 17
+fails Capacitor's source level 21).
+
+Two traps: `sdkmanager --licenses` hangs when stdin is not a live terminal —
+write the license-hash files into `$ANDROID_HOME/licenses/` directly instead. And
+`android/local.properties` is git-ignored, so it still holds the previous
+machine's `sdk.dir` and must be repointed.
+
+`npm run verify:versions` fails when `package.json` and
+`android/app/build.gradle` disagree. They had drifted to 1.1.37 vs 1.1.47 and
+were reconciled to 1.1.47 on 2026-08-17.
+
+---
+
+## One fix, every build — the cross-build cadence
+
+There is **one codebase and one web bundle**; "the Fire build", "the TV build",
+and "the ArborXR build" are the same source shipped through different doors. A
+fix landed on one device is not done until it has gone through every door. This
+section is the checklist that makes that automatic. It exists because on
+2026-08-17 the YouTube channel-art fix was verified on the Fire while the Google
+TV, the sideloaded onn tablet, and the whole ArborXR fleet were still running the
+broken code — none of them were "wrong", they were just not on the list.
+
+### The build matrix
+
+| Target | Package / key | How it gets a build | Where it is checked |
+|---|---|---|---|
+| Fire 7 kiosk (`GR71WE05531501MX`) | `com.orgista.openpanel.debug`, Mac Studio debug key `11b408c4…` | `adb install -r` of the debug APK, **only** from a machine holding that key (see [the Fire uninstall block](#the-debug-key-and-the-uninstall-block)) | `adb` row |
+| Google TV (`192.168.1.189`) | `com.orgista.openpanel.debug`, same debug key | `adb install -r` of the same debug APK | `adb` row |
+| Sideloaded production tablets (e.g. onn 11 Pro `ONN11PRO00156016`, Device Owner) | `com.orgista.openpanel`, production key `94323ad0…` | `adb install -r` of the signed release APK | `adb` row |
+| ArborXR fleet (Kids / Boys / Music groups, Pink TCL canary) | `com.orgista.openpanel`, production key | `scripts/deploy-arborxr-beta.sh` (upload → Debug on Pink TCL → promote Production) | `arborxr` rows + channel table |
+
+Anything that answers `adb devices` or is enrolled in ArborXR appears in the
+table automatically; nothing has to be remembered.
+
+### The checklist
+
+1. **Classify the fix.** Web bundle (`src/`, anything under `src/app`) → every
+   target above is affected, full stop. Native Android (`android/app/src/main`) →
+   every target is affected unless the code is inside a platform guard
+   (`isFireOs`, `isTelevision`, `FEATURE_LEANBACK`, `Build.MANUFACTURER`); if it
+   is guarded, say which targets in the commit message and still rebuild all of
+   them, because the manifest and the shared web bundle change regardless.
+2. **Bump once, build both flavours.** `package.json` + `android/app/build.gradle`
+   move together (`npm run verify:versions`). Build **debug and release from the
+   same tree** in the same sitting — `assembleDebug` for the Fire/TV door,
+   `scripts/build-release-keychain.sh` for the production door — so no target is
+   ever more than one build behind. Copy both to `artifacts/openpanel-<ver>-{debug,release}.apk`
+   with a `.sha256`.
+3. **Ship every door, canary first.**
+   - Fire: `adb install -r`, then verify the specific fix on the device (screenshot
+     or a DevTools/DOM check — the channel-art bug looked fine in the data and was
+     only visible in the rendered tiles).
+   - TV and any sideloaded tablet on adb: `adb install -r` the matching flavour.
+   - ArborXR: `deploy-arborxr-beta.sh test-candidate` (Pink TCL only) →
+     `deploy-production`. If its assignment audit refuses, fix the assignment; do
+     not work around the gate.
+4. **Prove it with the table.** Run
+
+   ```sh
+   scripts/openpanel-fleet-versions.sh
+   ```
+
+   Every row must read `current`. A `BEHIND` row is an unshipped door; an
+   `(offline)` row is a device that will pick the build up on its own and should
+   be re-checked later. Paste the table into the handoff / commit.
+5. **Record it in the relevant device section** of this README (Fire / TV /
+   ArborXR) — what changed and the version that carries it — so the next person
+   reading only that section sees the current state.
+
+### Why the two flavours must move together
+
+The debug package and the production package are *different apps* on the device
+(different package names, different signing keys), so a device can hold both and
+they never update each other. Kairo and Osias currently carry an old
+`com.orgista.openpanel.debug` (1.1.39) next to the managed production install; it
+is harmless but it is not the fix. When checking a device, check the package that
+is actually the launcher there.
+
+### Fleet state at the time of writing (2026-08-17)
+
+`scripts/openpanel-fleet-versions.sh` output after the channel-art fix:
+
+- `adb`: Fire 7 `1.1.48-debug` current · Google TV `1.1.48-debug` current ·
+  onn 11 Pro `1.1.48` current.
+- `arborxr`: Public TCL, Pink TCL, Kairo, Osias on `1.1.45` (**BEHIND**); Samsung
+  A9+ and ONN (Ontario) `pending-install`, offline for weeks. Build `1.1.48`
+  (code 57, SHA-256 `c264f5aa…`) is uploaded and `available` in ArborXR but no
+  channel points at it yet — the guarded deploy stopped because **Kids and Boys
+  are assigned the Debug channel** (Debug is meant to be Pink TCL only; Music is
+  the only group on Production). Restore Kids/Boys → Production, then run
+  `deploy-arborxr-beta.sh test-candidate` and `deploy-production`; or, knowingly,
+  pin Debug and Production to the 1.1.48 build directly, accepting that Kids/Boys
+  update without the Pink TCL canary.
+
+---
+
+## Google TV and Android TV
+
+## OpenPanel — Google TV & Android TV
+
+Television-specific configuration, deployment guidance, and behavioural
+differences from mobile devices.
+
+Shared product overview, build, signing, storage, security, repository policies,
+and license/attribution notices live in
+[the mobile section](#mobile-tablet-and-xr). Fire OS behaviour lives in
+[the Fire OS section](#amazon-fire-os).
+
+- **Package:** `com.orgista.openpanel`
+- **TV surface:** `LEANBACK_LAUNCHER` category plus a 16:9 TV banner
+  (`@drawable/openpanel_tv_banner`), declared in the same single APK as the
+  phone/tablet `LAUNCHER` entry.
+- **Optional hardware:** `android.software.leanback`,
+  `android.hardware.touchscreen`, and `android.hardware.faketouch` are all
+  declared `required="false"` so one APK installs across TV, tablet, and XR.
+
+### Android 17 and Google TV readiness
+
+OpenPanel uses the latest stable Capacitor 8 Android toolchain: compile SDK 36,
+target SDK 36, and minimum SDK 24. The manifest does not set `maxSdkVersion`, so
+the APK remains installable on Android 17/API 37 devices. Android 17 is still a
+beta platform as of July 2026, so the production build keeps the stable API 36
+target while its all-app behaviour changes are reviewed and tested. Target SDK 37
+should be adopted only after Android 17 and the supporting Capacitor/Android
+Gradle toolchain are stable; prerelease framework dependencies are intentionally
+excluded from production.
+
+Current readiness work includes:
+
+- adaptive tablet and TV layouts in landscape and portrait;
+- launcher and Leanback launcher declarations in one APK;
+- a 16:9 TV banner and optional touchscreen/faketouch hardware;
+- Google TV/D-pad controller detection and system speech recognition;
+- a keyboard-free PIN keypad with explicit D-pad focus movement;
+- API-key-free exact YouTube channel verification using unique handles and
+  canonical channel IDs, plus a recent-video channel browser and direct video and
+  playlist URLs;
+- D-pad-visible focus states and a close-first restricted YouTube player;
+- keep-screen-awake behaviour only while YouTube is open;
+- no bundled native shared libraries, avoiding native 64-bit/16 KB page-size
+  compatibility risks;
+- backup disabled and no maximum supported Android version.
+
+Before raising `targetSdkVersion` to 37, repeat the web interaction suite,
+Android lint/unit tests, on-device instrumentation, Google TV D-pad navigation,
+ArborXR lock-task behaviour, signed upgrade verification, and a full API 37
+emulator or physical-device pass. The current workstation has the API 37.1
+platform files but not an Android 17 runtime image, so installability is
+build-reviewed rather than claimed as physical API 37 validation.
+
+### Google TV input behaviour
+
+- OpenPanel detects television UI mode, Leanback support, touch availability,
+  attached D-pad/game controllers, alphabetic keyboards, and the active remote
+  device name when Android exposes it.
+- PIN creation and entry use OpenPanel's on-screen numeric keypad, so Gboard no
+  longer covers or resizes the PIN card. D-pad arrows move predictably between
+  keys; OK selects; hardware number keys also work.
+- The YouTube channel field is declared as a search input, allowing Google TV
+  Gboard to select its TV search layout and built-in speech-to-text.
+- The microphone button invokes Android's system speech recognizer and fills the
+  channel field with the result. OpenPanel does not request direct microphone
+  permission.
+- Some ArborXR lock-task policies block the recognizer's separate system Activity
+  even when Android reports it as installed. OpenPanel falls back to focusing the
+  channel field and tells the administrator to press the Google TV remote's
+  microphone button, which uses the supported TV keyboard/Gboard dictation path.
+- Recovery-answer and Wi-Fi fields no longer force Gboard to open immediately on
+  a remote-driven device. The keyboard opens only when the user selects the field.
+
+#### Remote Back handling
+
+`MainActivity` installs an `OnBackPressedCallback` that dispatches a synthetic
+`Escape` `keydown` into the WebView, targeting the highest-`z-index` visible
+element carrying `data-dpad-scope`. This lets the remote's Back button close the
+topmost modal/overlay rather than exiting the launcher.
+
+### Kiosk and exit-kiosk on TV
+
+Google TV is a non-Fire device, so `KioskState.canReliablyStartLockTask()`
+returns `true` and OpenPanel uses Android's real lock-task path rather than the
+Fire redirect fallback.
+
+- **Enter kiosk:** in standalone mode with kiosk enabled,
+  `MainActivity.pinKioskIfUnlocked()` runs on every window focus gain. As Device
+  Owner it first calls `KioskLock.applyDeviceOwnerLockdown(...)` to allow-list
+  OpenPanel and hide the status bar, so `startLockTask()` enters silent `LOCKED`
+  mode instead of showing Android's "App is pinned" confirmation dialog. Without
+  Device Owner it falls back to ordinary user-confirmed screen pinning.
+- **Exit kiosk:** the Admin Panel → Kiosk tab disables the
+  `.OpenPanelHomeActivity` HOME activity-alias. Because HOME lives on a
+  separately-toggleable alias, Android immediately falls back to the OEM
+  launcher while OpenPanel stays available from the app drawer. The lock task is
+  stopped alongside it.
+- **Leaving to a child app:** `SystemBridgePlugin` unpins before it deliberately
+  starts another activity (launching an app or a settings screen), then
+  `pinKioskIfUnlocked()` re-engages on the next focus gain when the user returns.
+
+### TV DNS filtering
+
+OpenPanel supervises a separate DNS-filter app instead of embedding a VPN and
+resolver into the launcher. Keeping those responsibilities separate reduces
+launcher risk, preserves the Android one-VPN-at-a-time security model, and lets
+the DNS component be updated independently.
+
+The tested package is `dnsfilter.android` (personalDNSfilter). OpenPanel's
+TV-only **Admin Panel → Device Health → DNS & Telemetry** section reports:
+
+- whether personalDNSfilter is installed and enabled;
+- whether its process owns the active VPN network;
+- always-on VPN and lockdown state;
+- Android Private DNS mode and a warning when it can bypass the local filter;
+- whether OpenPanel is allowed to manage always-on VPN as Device Owner.
+
+OpenPanel deliberately does not download, install, or silently authorize the
+filter. Android requires one-time user consent before any app can create a VPN.
+There can only be one active VPN per Android user, so this design is not
+compatible with a second simultaneous VPN client.
+
+Some Android 9 TV firmware honors personalDNSfilter's phone orientation while the
+system consent activity is open. On the tested TCL this rotates the whole
+display, starts the ambient screen, and makes remote focus unreliable. For that
+reason OpenPanel reports the filter state but does not launch its phone UI from
+the TV Admin panel. Provision the one-time approval through the deployment
+workflow, then return to OpenPanel and verify **Filter VPN: Connected**.
+
+#### Recommended TV profile
+
+Use a small, predictable configuration:
+
+- upstream: AdGuard filtered DNS over HTTPS, with its filtered UDP resolvers as
+  fallback;
+- primary list: 1Hosts Lite only, refreshed every seven days;
+- local overrides: `assets/dns/tv-additional-hosts.txt`;
+- traffic logging: off after validation;
+- Private DNS: off while the local DNS VPN is active;
+- always-on VPN: on;
+- VPN lockdown: off unless the fleet administrator has an independently tested
+  recovery path.
+
+The local override file is intentionally short. Do not block broad domains such
+as `google.com`, `googleapis.com`, `youtube.com`, `googlevideo.com`, `tcl.com`,
+Amazon Web Services, CloudFront, or Akamai. Those domains share streaming,
+authentication, update, and CDN infrastructure. Validate YouTube, Netflix, OS
+updates, captive-portal detection, and device management after every list change.
+
+DNS filtering can reduce background requests and data transfer. It is not a
+guaranteed speed boost: a slow resolver or oversized list can increase latency,
+and DNS cannot stop traffic sent to hard-coded IP addresses or an app's own
+encrypted resolver.
+
+#### Management modes
+
+In standalone mode, OpenPanel can call Android's Device Owner API to select
+personalDNSfilter as always-on. OpenPanel always requests `lockdown=false` so a
+filter failure does not strand the TV offline.
+
+For an explicitly ADB-managed test TV, an operator can recover an already
+configured filter without using the rotated consent UI:
+
+```sh
+adb shell appops set dnsfilter.android ACTIVATE_VPN allow
+adb shell settings put secure always_on_vpn_app dnsfilter.android
+adb shell settings put secure always_on_vpn_lockdown 0
+adb shell am start -n dnsfilter.android/.DNSProxyActivity
+adb shell input keyevent KEYCODE_HOME
+```
+
+The brief activity launch starts the app-owned VPN after authorization; Home
+immediately restores the TV's normal landscape launcher. Use this only on a TV
+the operator owns or is authorized to administer.
+
+When ArborXR or another DPC owns the device, OpenPanel reports status but does
+not override the active DPC. Deploy the filter as its own managed application and
+configure always-on VPN through the management policy or the TV's VPN settings.
+Do not configure both a local DNS VPN and a strict Private DNS host unless the
+resolver is reachable through and outside the VPN.
+
+#### Recovery
+
+Every package change in OpenPanel's Device Health policy is exact-name and
+reversible. For an ADB-serviced TV, the relevant recovery operations are:
+
+```sh
+adb shell settings delete secure always_on_vpn_app
+adb shell settings delete secure always_on_vpn_lockdown
+adb shell am force-stop dnsfilter.android
+adb shell pm enable --user 0 PACKAGE_NAME
+```
+
+Restore only packages recorded as disabled during that TV's deployment. Do not
+bulk-enable every system package: OEM images contain intentionally disabled
+components.
+
+### UniFi domain rules and Google shared-IP collateral
+
+Site-network context, diagnosed 2026-08-17. This is not an OpenPanel defect, but
+it breaks OpenPanel builds and device provisioning, and the same trap applies to
+the DNS guidance above.
+
+The site's UniFi gateway runs a managed Traffic Rule that blocks YouTube by
+**domain**. UniFi resolves each configured domain to IP addresses and blocks by
+address — and Google serves much of its estate from shared front-end IPs. On the
+day this was diagnosed:
+
+```text
+dl.google.com         →  142.250.100.91, .93, .136, .190
+music.youtube.com     →  142.250.100.91, .93, .136, .190   (identical)
+youtube-nocookie.com  →  142.250.100.91, .93, .136, .190   (identical)
+youtu.be              →  142.250.100.91, .93, .136, .190   (identical)
+www.google.com        →  142.251.157.119                   (different, unaffected)
+```
+
+Blocking `youtu.be` therefore also blocked `dl.google.com` — the Android SDK and
+Google Maven host — for every client targeted by the rule. Because a cron
+refresher re-resolved the domains every minute and Google rotates which IPs a
+hostname returns, the breakage was intermittent: large downloads would sometimes
+succeed and then fail minutes later.
+
+Consequences worth knowing:
+
+- **There is no way to allow `dl.google.com` while blocking `youtu.be` by
+  domain**, because they share addresses. Removing the real YouTube domains would
+  defeat the policy.
+- The workable fix is a **per-client exemption** (`exclude_macs`) for any machine
+  that must reach Google infrastructure — build hosts, provisioning laptops.
+- Clients using **randomized/private MAC addresses** silently lose their
+  exemption when the MAC rotates. Prefer a stable per-network MAC on any build or
+  admin machine.
+- The Fire tablet was never affected because it already carried an exemption.
+- The DPI **app-ID** rule blocks YouTube without this side effect; domain rules
+  on shared-CDN hostnames are what cause collateral.
+
+The same reasoning underlies the warning in the DNS profile above against
+blocking broad domains such as `google.com`, `googleapis.com`, or
+`googlevideo.com` — those hostnames share streaming, authentication, update, and
+CDN infrastructure.
+
+### TV debloat helper
+
+`scripts/tv-debloat-adb.sh <device-serial> [preview|apply|restore]` mirrors
+OpenPanel's reviewed TCL/generic TV policy. It refuses to run against a device
+that does not report `android.software.leanback`, and it operates on an exact
+package list only — deliberately excluding Settings, WebView, Play services,
+launchers, TV input, HDMI, Wi-Fi, Bluetooth, OTA, package installation, and ADB
+services.
+
+```sh
+./scripts/tv-debloat-adb.sh 192.168.1.189:5555 preview   # list eligible packages
+./scripts/tv-debloat-adb.sh 192.168.1.189:5555 apply     # pm uninstall --user 0
+./scripts/tv-debloat-adb.sh 192.168.1.189:5555 restore   # cmd package install-existing
+```
+
+`apply` removes packages for user 0 only; `restore` reinstalls the existing
+system copies. Nothing touches the read-only system partition.
+
+### YouTube channel verification
+
+OpenPanel does not require a YouTube API key. In **Admin Panel → YouTube**, an
+administrator can enter a channel name, unique `@handle`, channel ID, or channel
+URL. The native Android bridge:
+
+1. normalizes the entry into an exact YouTube channel URL;
+2. downloads that public channel page;
+3. requires a canonical `UC…` channel ID in the response;
+4. extracts the channel title and artwork; and
+5. returns the canonical `youtube.com/channel/UC…` URL to the Admin Panel.
+
+The **Add** button appears only after verification succeeds. Invalid and missing
+handles are rejected instead of creating a broken launcher tile.
+
+YouTube channel display names are not unique, while handles are unique. A plain
+name such as `Google Developers` is therefore tried as the exact handle
+`@GoogleDevelopers`. If a channel's display name and handle differ, enter the
+unique `@handle`. This intentionally avoids scraping YouTube's general search
+results.
+
+Video and playlist URLs can still be pasted directly. No credential is created,
+requested, stored, or shipped in the APK.
+
+#### Browsing an approved channel
+
+Opening a verified channel tile does not start an arbitrary or automatically
+selected video. OpenPanel requests YouTube's public Atom feed for the approved
+canonical channel ID, validates the returned channel and video IDs in the native
+Android bridge, and shows the channel's recent uploads as a D-pad- and
+touch-friendly grid. The user chooses a video, which then opens in the same
+restricted player used for individually approved video links.
+
+This is intentionally not general YouTube search: the browser exposes only recent
+uploads from the channel that an administrator approved. Older handle-only
+entries that predate canonical-ID verification must be removed and added again
+before the recent-video browser can load them.
+
+### Child-safe boundary on TV
+
+The child-facing catalog policy is identical across Fire OS, generic Android
+tablets, Google TV, and XR — see
+[the mobile section](#child-safe-app-and-browser-boundary)
+for the package policy and the Kiddle-only Safe Browser.
+
+### Device validation record — Pink TCL, 2026-07-28
+
+Kiosk exit-and-return pass on the ungrouped ArborXR test device. Screenshots and
+compressed logs for this run remain under
+`artifacts/device-tests/pink-tcl-2026-07-28-app-exit/` (git-ignored).
+
+- Device: TCL 9183W, Android 12
+- Production: OpenPanel 1.1.24 (`com.orgista.openpanel`)
+- Local test build: 1.1.26-debug, code 35 (`com.orgista.openpanel.debug`)
+- ArborXR lock task remained `LOCKED`; no device data was cleared.
+
+Twelve assigned apps launched during the exit pass. Android Home returned to
+OpenPanel for all twelve; individual Back-button behaviour remains app-specific.
+
+Bloons TD 6 version 55.2 launches from its OpenPanel tile and reaches the start
+screen. Earlier runs captured an intermittent Google Play Licensing
+`NullPointerException` inside Bloons; OpenPanel itself did not reject or crash
+the launch.
+
+The final bottom-swipe test started at the far-left edge in Bloons and returned
+directly to production OpenPanel. The accessibility service initiated the
+activity as its own UID, ArborXR's kiosk launch activity did not appear, and the
+visible handle is a compact 72 × 4 dp pill near the bottom edge.
+
+### Deployment
+
+Google TV is a compatible non-Fire target, so it uses the standard ArborXR
+companion flow or the standalone Device Owner flow documented in
+[the mobile section](#deploy--arborxr). Device Owner
+provisioning commands are in
+[the mobile section](#managed-android-provisioning-device-owner).
+
+**Live TV state (2026-08-17):** the Google TV at `192.168.1.189` (TCL "Smart TV",
+Android 9, device `BeyondTV`) is *not* ArborXR-managed; it runs
+`com.orgista.openpanel.debug` signed with the Mac Studio debug key, upgraded over
+adb from 1.1.47-debug to **1.1.48-debug** (channel-art fix) in place. HOME on that
+TV resolves to `com.tcl.keycustomfunctionservice/.FallbackHome`, i.e. OpenPanel
+is launched, not the system launcher. It shows up in
+`scripts/openpanel-fleet-versions.sh` as an `adb` row when its wireless ADB is
+authorised (`adb connect 192.168.1.189:5555`).
+
+---
+
+## Amazon Fire OS
+
+## OpenPanel — Amazon Fire OS
+
+Fire-tablet-specific configuration, kiosk behaviour, and verification profile.
+
+Shared product overview, build, signing, storage, security, repository policies,
+and license/attribution notices live in
+[the mobile section](#mobile-tablet-and-xr). Google TV behaviour lives in
+[the Google TV section](#google-tv-and-android-tv).
+
+### Verified device and build
+
+OpenPanel has a physical-device verification profile for the Amazon Fire 7
+(2022, 12th Generation). Amazon identifies this tablet by model `KFQUWI`; the
+Android device, product, and build codename is `quartz`. See Amazon's
+[Fire tablet identification guide](https://developer.amazon.com/docs/device-specs/ft-identify-tablet-devices.html).
+
+| Field | Verified value |
+| --- | --- |
+| Tablet | Amazon Fire 7 (2022, 12th Generation) |
+| Model / codename | `KFQUWI` / `quartz` |
+| Fire OS | Fire OS 8, build `RS8338.3339N` |
+| Android base | Android 11, API 30 |
+| Physical display | 600×1024 at 160 dpi |
+| OpenPanel orientation | Reverse landscape (`user_rotation=3`) |
+| OpenPanel app viewport | 1024×552 after Fire OS's 48 px navigation inset |
+| Verified OpenPanel build | 1.1.37-debug, version code 46 |
+| Local artifact name | `openpanel-1.1.37-fire-kids-kiosk-debug.apk` |
+| Verification date | 2026-08-14 |
+
+### UI verification
+
+The Settings Wi-Fi and Bluetooth pages and all eight Admin Panel tabs were
+checked on the physical device: Applications, Device Health, Books & Audio,
+YouTube, Screen Saver, Kiosk Lock, Bug Log, and Security. At the Fire 7's usable
+height, the modal reserves the Fire OS navigation inset, keeps all Admin tabs on
+one line, preserves 40 px touch targets, and scrolls panel content independently
+without moving the tab bar. The Settings admin footer remains fully visible.
+
+Fire OS can reserve the bottom 48 px even when CSS reports the full 600 px
+physical height. Responsive modal rules must account for that inset; testing at
+an ordinary 1024×600 desktop viewport alone is not sufficient.
+
+### Fire OS management limits
+
+The Fire profile always selects standalone mode and does not show ArborXR or
+Device Owner enrollment. OpenPanel uses the controls available to a normal Fire
+app: launcher/Home redirection through accessibility, device admin where Fire OS
+permits it, notification-listener policy, overlay and usage access, system-UI
+protection, and a foreground-return loop. Enabling **Fire kiosk** records this
+redirect kiosk state without triggering Fire OS's unreliable screen-pinning
+prompt.
+
+This is intentionally described as a Fire standalone kiosk rather than Android
+Device Owner. Managed Android provisioning remains available for compatible
+non-Fire devices and is documented in
+[the mobile section](#managed-android-provisioning-device-owner).
+The target tablet does not generate an enrollment QR that would disappear during
+a factory reset.
+
+Fire builds force OpenPanel into standalone mode. They use the protected Amazon
+launcher plus OpenPanel's accessibility Home redirect, device admin, notification
+blocking, overlay/usage access, and reversible ADB configuration. The Admin Panel
+intentionally contains no ArborXR selector, Device Owner status step, or
+on-device enrollment QR.
+
+---
+
+### How the Fire kiosk actually works
+
+Fire OS does not let a third-party app take the HOME role the way stock Android
+does, and `KioskState.canReliablyStartLockTask(deviceOwner, fireDevice)` returns
+`deviceOwner || !fireDevice`. On a non-Device-Owner Fire tablet that is **false**,
+so `startLockTask()` is never called. The Fire kiosk is therefore a *redirect*
+kiosk, not a lock-task kiosk.
+
+The mechanism is:
+
+1. `KioskState.normalizeModeForDevice()` forces `MODE_STANDALONE` on any device
+   where `LandscapeOrientationLock.isFireDevice(MANUFACTURER, BRAND)` is true.
+2. `HomeGestureAccessibilityService` observes `TYPE_WINDOW_STATE_CHANGED` and
+   `TYPE_WINDOWS_CHANGED` events.
+3. When the foreground window belongs to `com.amazon.firelauncher`,
+   `FireLauncherRedirect.shouldRedirect(windowPackage, managementMode,
+   openPanelHomeEnabled)` returns true and the service calls `returnToOpenPanel()`
+   (debounced at 500 ms).
+4. `SystemUiProtection` separately collapses the notification shade, and a
+   top-edge accessibility overlay guards against pull-down.
+
+`KioskState` persists `managementMode`, `kioskEnabled`, and `keyguardDisabled` in
+the `openpanel.kiosk` SharedPreferences file, so the *intent* to be in kiosk
+survives a reboot.
+
+#### Audit finding — kiosk does not reliably re-arm after reboot
+
+**Status: open defect as of 1.1.47 (versionCode 56).** Three gaps were found
+while auditing the reboot path.
+
+**1. There is no boot receiver at all.** The manifest declares no
+`RECEIVE_BOOT_COMPLETED` permission and no `BOOT_COMPLETED` / `LOCKED_BOOT_COMPLETED`
+receiver, and no source file references either action. Nothing starts OpenPanel
+when the tablet finishes booting.
+
+*Confirmed on hardware (2026-08-17, serial `GR71WE05531501MX`, installed
+1.1.37-debug / code 46):*
+
+```console
+$ adb shell dumpsys package com.orgista.openpanel.debug | grep -i BOOT_COMPLETED
+                                     # (no output — permission not declared)
+
+$ adb shell cmd package query-receivers \
+    -a android.intent.action.BOOT_COMPLETED | grep -c packageName
+118                                  # boot receivers registered on the device
+
+$ adb shell cmd package query-receivers \
+    -a android.intent.action.BOOT_COMPLETED | grep -ci openpanel
+0                                    # none of them are OpenPanel
+```
+
+**2. The accessibility service does not evaluate the window that is already in
+front when it connects.** `onServiceConnected()` calls
+`LandscapeOrientationLock.enforce`, `KioskVolumePolicy.enforceTarget`,
+`addHomeHandle()`, `addShadeGuard()`, and `syncShadeGuardVisibility(getPackageName())`
+— note it passes OpenPanel's *own* package rather than the actual foreground
+window — and it never calls `FireLauncherRedirect.shouldRedirect(...)`.
+
+That is exactly the post-reboot situation: Fire OS boots straight into
+`com.amazon.firelauncher`, and the launcher window settles *before* the
+accessibility service binds. Because the redirect only ever fires from
+`onAccessibilityEvent`, and no new window-state-change event occurs for a window
+that is already stable and focused, the redirect never runs. The tablet sits on
+the Amazon launcher until something else changes the foreground window.
+
+**3. The Fire launcher package is a single hardcoded constant.**
+`FireLauncherRedirect.FIRE_LAUNCHER_PACKAGE` is `"com.amazon.firelauncher"` only.
+Fire OS uses different home packages across generations and OTA builds, and the
+first-boot setup/OOBE activity is a different package again. Any Fire build whose
+home package differs is not redirected at all. Confirm the live value with:
+
+```sh
+adb shell cmd package resolve-activity \
+  -a android.intent.action.MAIN -c android.intent.category.HOME
+```
+
+(The `--brief` form alone returns "No activity found" on Fire OS 8 — the action
+must be supplied.)
+
+#### Live device state — audited 2026-08-17
+
+Audited over ADB against the verified tablet (serial `GR71WE05531501MX`,
+`KFQUWI`/`quartz`, Fire OS 8 `RS8338.3339N`, Android 11/API 30).
+
+**Resolved HOME is `com.amazon.firelauncher/.Launcher`** (`isDefault=true`,
+`enabled=true`), so the original single constant was correct *for this build*.
+The broadened set is robustness, not a fix for this unit — but note that
+`com.amazon.hedwig` and `com.amazon.tv.launcher` are both installed on this
+tablet (`hedwig` currently `enabled=3`, disabled-by-user). An OTA that promotes
+either to HOME would have silently defeated the old single-constant check.
+
+Installed: `com.orgista.openpanel.debug` **1.1.37-debug (versionCode 46)** only —
+the production package is not present.
+
+Special-access grants were **already all in place**, so no ADB grant pass was
+needed on this unit:
+
+| Grant | State |
+| --- | --- |
+| `enabled_accessibility_services` | `…/HomeGestureAccessibilityService` present, `accessibility_enabled=1` |
+| `enabled_notification_listeners` | `…/OpenPanelNotificationListenerService` present |
+| `SYSTEM_ALERT_WINDOW` | allow |
+| `GET_USAGE_STATS` | allow |
+| `WRITE_SETTINGS` | allow |
+| deviceidle whitelist | `com.orgista.openpanel.debug` present |
+
+Persisted kiosk state (`/data/data/<pkg>/shared_prefs/openpanel.kiosk.xml`):
+
+```xml
+<boolean name="kioskEnabled" value="false" />
+<string name="managementMode">standalone</string>
+<boolean name="keyguardDisabled" value="false" />
+```
+
+**Kiosk is currently disarmed on this tablet**, which is why the Amazon launcher
+owns HOME. `KioskBootReceiver` correctly does nothing in this state — kiosk must
+be enabled before any reboot test is meaningful.
+
+#### Fix applied — not yet verified on hardware
+
+All three gaps have been addressed in the working tree. **This code has not been
+compiled or run**: the build host had no Android SDK at the time (see the note at
+the end of this section), so treat it as reviewed-but-unverified until it is
+built and tested on the Fire 7.
+
+**`KioskBootReceiver`** (new) — registered for `BOOT_COMPLETED` with the
+`RECEIVE_BOOT_COMPLETED` permission. It re-arms the kiosk only when standalone
+mode, `KioskState.isEnabled()`, and the HOME alias all agree, so **Exit Kiosk
+still survives a reboot unchanged**. It is not direct-boot aware by design —
+`KioskState` reads credential-encrypted preferences that do not exist before
+first unlock, so `LOCKED_BOOT_COMPLETED` is deliberately not handled. Android 10+
+blocks background activity starts; OpenPanel's kiosk already requires
+`SYSTEM_ALERT_WINDOW`, which is the exemption that permits this start. If the
+start is still refused, the failure is logged and the accessibility path below
+recovers it.
+
+**`HomeGestureAccessibilityService.onServiceConnected()`** now schedules a
+foreground-window audit at 750 ms / 2.5 s / 6 s. Each pass reads
+`getRootInActiveWindow()` and runs the same `shouldRedirect(...)` decision
+against whatever is already in front, instead of waiting for an event that never
+comes. The staggered retries cover both the window not being queryable the
+instant the service binds and Fire OS re-showing its launcher as boot settles.
+`onDestroy()` now clears all pending handler callbacks, not just the transition
+policy.
+
+**`FireLauncherRedirect`** now matches an exact-name *set* of Fire home/setup
+packages rather than a single constant, and accepts an optional
+`resolvedHomePackage` argument so an unrecognised Fire home is still caught.
+That fallback is **Fire-only** — `foreignHomePackage()` returns null off Fire, so
+generic Android keeps its existing behaviour and OpenPanel never bounces a user
+off an OEM launcher that Android still treats as the default. Package matching
+remains exact-name throughout, per the repository's no-wildcard policy.
+
+Unit tests in `FireLauncherRedirectTest` cover the new home packages, the
+resolved-home fallback, and the null-package edges.
+
+**Still to do before this can be called fixed:**
+
+1. `./scripts/gradle-local.sh :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`
+2. Install on the Fire 7, enable kiosk, reboot, and confirm OpenPanel returns
+   without any touch input.
+3. Confirm Exit Kiosk still leaves the Amazon launcher in place across a reboot.
+4. Confirm the live home package with
+   `adb shell cmd package resolve-activity -c android.intent.category.HOME --brief`
+   and add it to the exact-name set if it is not already there.
+
+#### Audit finding — "auto-grant all necessary features" is not possible in-app
+
+`DeviceAccess` documents this boundary directly: the grants the Fully-style kiosk
+depends on are per-app *app-ops* and secure settings that **no** app can flip for
+itself, and that a Device Owner cannot flip either through a public API. They are:
+
+| Grant | Read by | Can the app grant it? |
+| --- | --- | --- |
+| Accessibility service | `isAccessibilityServiceEnabled` | No — `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` |
+| Notification listener | `isNotificationListenerEnabled` | No — `enabled_notification_listeners` |
+| Draw over other apps | `canDrawOverlays` | No — `SYSTEM_ALERT_WINDOW` app-op |
+| Usage access | `hasUsageAccess` | No — `GET_USAGE_STATS` app-op |
+| Write settings | `canWriteSettings` | No — `WRITE_SETTINGS` app-op |
+| Ignore battery optimization | `isIgnoringBatteryOptimizations` | No — user confirmation |
+
+OpenPanel's UI correctly reads each state and deep-links to the right Settings
+screen. On a Fire tablet without Device Owner there is no in-app path to grant
+them, so a fully hands-off first boot is not achievable from application code
+alone. The supported way to pre-grant them is a one-time ADB provisioning pass
+from an authorized workstation (below).
+
+---
+
+### ADB provisioning
+
+Fire OS clears ADB-over-TCP on every reboot, so re-enable it from USB when
+needed:
+
+```sh
+adb devices                 # confirm the tablet over USB first
+adb tcpip 5555
+adb connect 192.168.1.193:5555
+```
+
+Always confirm you are pointed at the right device before applying anything —
+these commands are destructive to kiosk state if aimed at the wrong tablet:
+
+```sh
+adb -s "$ADB_SERIAL" shell getprop ro.product.model     # expect KFQUWI
+adb -s "$ADB_SERIAL" shell getprop ro.serialno
+```
+
+#### One-time special-access grants
+
+These are the grants that cannot be made from inside the app. Use
+`com.orgista.openpanel.debug` for a debug build.
+
+```sh
+PKG=com.orgista.openpanel
+
+adb -s "$ADB_SERIAL" shell appops set $PKG SYSTEM_ALERT_WINDOW allow
+adb -s "$ADB_SERIAL" shell appops set $PKG GET_USAGE_STATS allow
+adb -s "$ADB_SERIAL" shell appops set $PKG WRITE_SETTINGS allow
+adb -s "$ADB_SERIAL" shell dumpsys deviceidle whitelist +$PKG
+
+adb -s "$ADB_SERIAL" shell settings put secure enabled_accessibility_services \
+  $PKG/com.orgista.openpanel.HomeGestureAccessibilityService
+adb -s "$ADB_SERIAL" shell settings put secure accessibility_enabled 1
+adb -s "$ADB_SERIAL" shell cmd notification allow_listener \
+  $PKG/com.orgista.openpanel.OpenPanelNotificationListenerService
+```
+
+Verify each one afterwards rather than assuming success:
+
+```sh
+adb -s "$ADB_SERIAL" shell settings get secure enabled_accessibility_services
+adb -s "$ADB_SERIAL" shell settings get secure enabled_notification_listeners
+adb -s "$ADB_SERIAL" shell appops get $PKG
+```
+
+Note that `settings put secure enabled_accessibility_services` **overwrites** the
+whole colon-separated list. Read the existing value first and append to it if any
+other accessibility service must stay enabled.
+
+#### Game display compatibility
+
+Some game APKs declare their launcher activity as non-resizable. Fire OS 8 then
+uses Android size-compatibility mode when the tablet is locked to landscape,
+rendering the game in a roughly 600×351 window with large black borders. Apply
+the following after confirming ADB is pointed at model `KFQUWI`:
+
+```sh
+adb -s "$ADB_SERIAL" shell settings put global force_resizable_activities 1
+adb -s "$ADB_SERIAL" shell wm set-user-rotation lock 3
+adb -s "$ADB_SERIAL" shell wm set-fix-to-user-rotation disabled
+```
+
+Confirm the effective settings with:
+
+```sh
+adb -s "$ADB_SERIAL" shell settings get global force_resizable_activities
+adb -s "$ADB_SERIAL" shell dumpsys window displays
+```
+
+The resizable-activity override lets games use the full display instead of a
+small size-compatibility window. Disabling fixed-to-user rotation allows a
+portrait-only game to rotate into the full 600×1024 portrait display. OpenPanel
+and landscape-native games return to reverse landscape. Do not patch and re-sign
+third-party APKs to change their declared orientation.
+
+#### Reversible device cleanup
+
+On an ADB-authorized Fire tablet, exact packages may be disabled for user 0 with
+`pm disable-user --user 0 PACKAGE` and restored with `pm enable PACKAGE`. Never
+disable packages outside the reviewed catalog or the protected system boundary
+described in
+[the mobile section](#device-health-and-debloat-policy).
+
+### Child-safe boundary on Fire
+
+The child-facing catalog policy is identical across Fire OS, generic Android
+tablets, Google TV, and XR — see
+[the mobile section](#child-safe-app-and-browser-boundary)
+for the package policy and the Kiddle-only Safe Browser. The Fire Silk components
+are part of the reviewed reversible-hide catalog.
+
+### Build and publication policy
+
+Use the source build commands in
+[the mobile section](#build). Debug APKs are local test
+artifacts and remain ignored by Git. Signed APKs must come from the protected
+release workflow so their package name, version, SDK range, and signing identity
+are reproducible and verifiable. Fire tablets are not ArborXR deployment targets
+in this project.
+
+---
+
+## Fire tablet handoff — open work as of 2026-08-17
+
+State of the Fire 7 (`KFQUWI`/`quartz`, serial `GR71WE05531501MX`) and what
+remains. Written for whoever picks this up on the Mac Studio.
+
+### Device state right now
+
+- **Installed: `com.orgista.openpanel.debug` 1.1.48-debug (versionCode 57)** —
+  upgraded in place on 2026-08-17, first from 1.1.37 (code 46) to 1.1.47 (56),
+  then to 1.1.48 (57) from the Mac Studio. Both upgrades used `adb install -r`
+  with the Mac Studio debug key, so no data was lost: the media volume lock, the
+  six Admin-configured YouTube channels, installed games, and Wi-Fi configuration
+  all survived. The launcher icon is now the current quad mark (the tablet
+  previously showed the older isometric-cube icon).
+- **1.1.48 fixes YouTube channel art rendering as letter fallbacks.** The art was
+  stored correctly (inline `data:` URLs, verified via WebView DevTools), but
+  `ArtImage`'s retry path appended `?op_retry=N` to *every* src, and
+  `data:…;base64,xxx?op_retry=1` is an invalid image. A stale retry timer armed
+  for the pre-migration remote URL fired after the src switched to inline art,
+  bumped the attempt counter, and cascaded all six tiles into the permanent
+  letter fallback. Inline art is now never cache-busted, retry timers are
+  cancelled on src change, and inline art skips retries entirely.
+- **Kiosk is disarmed** — `kioskEnabled=false` in
+  `/data/data/<pkg>/shared_prefs/openpanel.kiosk.xml`, so `com.amazon.firelauncher`
+  owns HOME.
+- **All six special-access grants are present** and survived the upgrade
+  (accessibility, notification listener, `SYSTEM_ALERT_WINDOW`, `GET_USAGE_STATS`,
+  `WRITE_SETTINGS`, battery whitelist). No ADB grant pass is needed unless the app
+  is fully reinstalled.
+- **`RECEIVE_BOOT_COMPLETED` is granted and `KioskBootReceiver` is registered** in
+  the device's `BOOT_COMPLETED` receiver list — verified after the upgrade, where
+  before the upgrade OpenPanel appeared in none of the device's 118 boot
+  receivers.
+- ADB reachable over USB and over Wi-Fi (the wireless port is not fixed across
+  reboots; find it with `adb mdns services` or re-enable in Developer Options).
+  On 2026-08-17 it was `192.168.1.193:38265`.
+- **Game library mirrored from ArborXR (2026-08-17).** The Fire is not an ArborXR
+  target, so the Pink TCL app list was replicated by hand: each game's exact
+  ArborXR build (the one the TCL's release channel points at) was pulled from the
+  build's signed `downloadUrl` (`abxr-cli apps versions <appId>`), SHA-256-checked
+  against ArborXR's checksum, and `adb install -r`'d — then **every one was
+  launched on the tablet and watched for 40-90 s** (process alive, foreground
+  activity, `FATAL EXCEPTION`, GMS dialogs, screenshot), because Fire OS has no
+  Google Play services and MicroG does not help there.
+
+  Runs (14, installed now): Among Us, Bloons TD 6 (wants a 561 MB in-app
+  content download on first run), Epic Stickman, Hill Climb Racing, Idle Egg
+  Factory, Lily's Garden (~90 s first load, then a "new version" nag with an X),
+  Minecraft (Microsoft sign-in prompt has "Maybe later"; plays offline), Mob
+  Control (~90 s first load), Shadow of Death (**demanded "Display over other
+  apps" and bounced to Settings until `appops set … SYSTEM_ALERT_WINDOW allow`
+  was granted over adb — now granted**), Sniper 3D, Subway Surfers, Swamp
+  Attack, TDS, The Archers.
+
+  Does not run on Fire OS — **uninstalled again**: Dan The Man and Into the Dead
+  (modal "won't run without Google Play services, which are not supported by
+  your device"), Plants vs Zombies (native abort inside
+  `play-services-measurement` during start), Machinarium (opens
+  `com.pairip.licensecheck.LicenseActivity`, the Play licensing check, then
+  exits), Fallout Shelter (the ArborXR package is a LiteAPKs *installer stub*,
+  not the game). Not attempted: Human Fall Flat (1.26 GB, no room), MicroG.
+
+  `/data` is 10 GB with ~2.2 GB free after this. Standalone mode is a deny-list
+  (`hiddenAppIds`, empty on this tablet), so the games appeared in Apps & Games
+  with no Admin step. **Rule for future additions:** a static GMS reference in
+  the manifest means nothing (the four games that always worked have them too);
+  the only test is launching it on the tablet and reading the screen and logcat.
+
+### The debug key and the uninstall block
+
+**The Fire tablet cannot be updated from a machine that lacks the original debug
+keystore.** Both escape routes are closed:
+
+```console
+$ adb install -r app-debug.apk
+Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: ... signatures do not match ...]
+
+$ adb uninstall com.orgista.openpanel.debug
+Failure [DELETE_FAILED_DEVICE_POLICY_MANAGER]
+
+$ adb shell pm uninstall --user 0 com.orgista.openpanel.debug
+Failure [DELETE_FAILED_DEVICE_POLICY_MANAGER]
+```
+
+`com.amazon.parentalcontrols` is **Profile Owner on user 0** and blocks the
+uninstall. Only that profile owner can clear `setUninstallBlocked`; there is no
+ADB command for it. OpenPanel itself is *not* a device admin on this tablet.
+
+Therefore: **build Fire APKs on the Mac Studio**, whose
+`~/.android/debug.keystore` matches the installed certificate
+(`11b408c4…36f8`). A build from any other machine can neither upgrade nor replace
+the install. If that keystore is ever lost, the only remaining paths are clearing
+the uninstall block through the Amazon Kids UI on the device, or installing the
+production package `com.orgista.openpanel` alongside as a separate app.
+
+### Work completed and shipped to the device
+
+Compiled, unit-tested, and **installed on the tablet** (1.1.47-debug / code 56,
+then 1.1.48-debug / code 57). The boot receiver's registration is confirmed
+on-device; the end-to-end reboot behaviour is the one thing still to observe (see
+Remaining steps):
+
+- `KioskBootReceiver` + `RECEIVE_BOOT_COMPLETED` — the kiosk had no way to re-arm
+  after a reboot.
+- Foreground-window audit in `HomeGestureAccessibilityService.onServiceConnected()`
+  at 750 ms / 2.5 s / 6 s — the redirect previously only fired from window-change
+  events, which never arrive for a launcher that settled before the service bound.
+- `FireLauncherRedirect` broadened from one hardcoded package to an exact-name set
+  plus a **Fire-only** resolved-HOME fallback.
+
+- `ArtImage` (1.1.48): inline `data:`/`blob:` art is never cache-busted on retry,
+  pending retry timers are cancelled when the src changes, and inline art goes
+  straight to the fallback (and `onPermanentFailure`) instead of retrying bytes
+  that cannot change. Verified on the tablet: all six channel tiles render art;
+  previously all six showed letter avatars.
+
+Validation: 77/77 Android unit tests, 97/97 UI tests (5 new for `ArtImage`), 0
+lint errors. A built APK verified as `versionCode 57 / 1.1.48-debug`, signed with
+the `11b408c4…` certificate, with both the permission and the receiver present in
+the merged manifest.
+
+### Remaining steps
+
+Steps 1-3 (rebuild with the matching key, in-place upgrade, grant verification)
+were completed on 2026-08-17. What is left:
+
+1. **Arm kiosk, reboot, and confirm OpenPanel returns with no touch input.** This
+   is the test that converts the boot fix from "registered" to "works". Set
+   `kioskEnabled` through the Admin UI rather than by editing the prefs file, so
+   the app's own state machine runs.
+2. **Confirm Exit Kiosk still leaves the Amazon launcher in place across a
+   reboot** — `KioskBootReceiver` is gated on the HOME alias precisely so that
+   exiting kiosk survives a restart. A regression here would strand the tablet in
+   kiosk.
+3. Watch `adb logcat -s OpenPanel` across the reboot. The receiver logs
+   `Boot completed; returned to the standalone OpenPanel kiosk` on success, and
+   `Boot activity start was refused; accessibility redirect will retry` if
+   Android's background-activity-start restriction blocks it — in which case the
+   `onServiceConnected()` foreground-window audit is the fallback that should
+   still recover it.
+4. Re-check the live HOME package after any Fire OS update:
+
+   ```sh
+   adb shell cmd package resolve-activity \
+     -a android.intent.action.MAIN -c android.intent.category.HOME
+   ```
+
+### Backup taken before any device change
+
+App data was archived before the (failed) reinstall attempt — 4.7 MB, 95 entries
+covering `shared_prefs`, `app_webview` (the Local Storage leveldb holding the
+admin PIN and catalog), and `files`. Recreate with:
+
+```sh
+adb exec-out "run-as com.orgista.openpanel.debug \
+  tar -cf - shared_prefs app_webview files" > fire-appdata-backup.tar
+```
+
+Restore with `run-as ... tar -xf -` after a reinstall. Android's `adb backup` is
+unavailable here because the manifest sets `allowBackup="false"`.

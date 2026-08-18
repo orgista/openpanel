@@ -3,7 +3,7 @@ name: Engine CI
 # This is the OPEN-CORE engine repo — it has no UI (the React app lives in a
 # separate private repo). So CI only verifies that the native engine compiles.
 # The full APK / signed-release build needs the private UI + signing secrets and
-# lives wherever the UI submodule is available (see docs/open-source-split.md).
+# lives wherever the UI submodule is available (see OPENPANEL-MOBILE.md).
 
 on:
   push:
