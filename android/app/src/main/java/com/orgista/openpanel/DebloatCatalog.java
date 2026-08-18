@@ -221,7 +221,13 @@ public final class DebloatCatalog {
             "app.xrdm.client",
             "app.xrdm.launcher",
             "com.orgista.openpanel",
-            "com.orgista.openpanel.debug"
+            "com.orgista.openpanel.debug",
+            // Additional Google TV Home/launcher-surface packages (L5): not in
+            // any debloat RULES entry today, but the safety net should name them
+            // so a future catalog addition can't accidentally disable them.
+            "com.google.android.apps.tv.launcherx",
+            "com.google.android.katniss",
+            "com.google.android.tungsten.setupwraith"
         ))
     );
 

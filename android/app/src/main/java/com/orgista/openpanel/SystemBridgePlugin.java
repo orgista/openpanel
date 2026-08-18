@@ -14,6 +14,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.InstallSourceInfo;
 import android.content.pm.PackageInfo;
@@ -24,6 +25,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
+import android.location.LocationManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.Uri;
@@ -42,7 +44,9 @@ import android.os.StatFs;
 import android.provider.Settings;
 import android.speech.RecognizerIntent;
 import android.text.Html;
+import android.content.res.Resources;
 import android.util.Base64;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.InputDevice;
 import android.view.View;
@@ -1053,12 +1057,34 @@ public class SystemBridgePlugin extends Plugin {
         return result;
     }
 
+    /** The package currently providing the on-screen keyboard/IME, if any. */
+    private String activeInputMethodPackage() {
+        String ime = Settings.Secure.getString(
+            getContext().getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD);
+        if (ime == null) return null;
+        int slash = ime.indexOf('/');
+        return slash >= 0 ? ime.substring(0, slash) : ime;
+    }
+
     private boolean setPackageHiddenByOpenPanel(
         String packageName,
         boolean hidden,
         Set<String> tracked
     ) {
         if (DebloatCatalog.isProtectedPackage(packageName)) return false;
+        // M6: only enforced for hides — restoring (hidden=false) a package that
+        // happens to now be the live Home/IME is still safe and desired.
+        // isNotificationPolicyProtected() already treats resolvedHomePackage()
+        // as protected; mirror that here so both guards agree instead of only
+        // one of them catching a package that has drifted into being the live
+        // Home/IME since the catalog was written.
+        if (hidden && packageName != null
+                && (packageName.equals(resolvedHomePackage())
+                    || packageName.equals(activeInputMethodPackage()))) {
+            Log.w(LOG_TAG, "Refusing to hide " + packageName
+                + " — it currently resolves Home or is the active input method");
+            return false;
+        }
         DebloatCatalog.Rule rule = DebloatCatalog.findRule(
             packageName, Build.MANUFACTURER, Build.BRAND);
         if (rule == null || findApplication(packageName) == null) return false;
@@ -1080,6 +1106,7 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void applyRecommendedDebloat(PluginCall call) {
+        if (!requireKioskAdmin(call, "applyRecommendedDebloat")) return;
         boolean manageNotifications = Boolean.TRUE.equals(
             call.getBoolean("manageNotifications", Boolean.TRUE));
         deviceHealthPrefs().edit()
@@ -1120,6 +1147,7 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void setDebloatPackageState(PluginCall call) {
+        if (!requireKioskAdmin(call, "setDebloatPackageState")) return;
         String packageName = call.getString("packageName");
         boolean hidden = Boolean.TRUE.equals(call.getBoolean("hidden", Boolean.TRUE));
         if (packageName == null || DebloatCatalog.findRule(
@@ -1149,6 +1177,7 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void restoreDebloatApps(PluginCall call) {
+        if (!requireKioskAdmin(call, "restoreDebloatApps")) return;
         if (!isOpenPanelDeviceOwner()) {
             call.resolve(debloatCapabilityResult(false,
                 "OpenPanel must still be Device Owner to restore managed apps."));
@@ -1302,6 +1331,7 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void setNotificationManagement(PluginCall call) {
+        if (!requireKioskAdmin(call, "setNotificationManagement")) return;
         boolean enabled = Boolean.TRUE.equals(call.getBoolean("enabled", Boolean.TRUE));
         ioExecutor.execute(() -> call.resolve(applyNotificationPolicy(enabled)));
     }
@@ -1465,6 +1495,7 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void setDnsFilterAlwaysOn(PluginCall call) {
+        if (!requireKioskAdmin(call, "setDnsFilterAlwaysOn")) return;
         boolean enabled = Boolean.TRUE.equals(call.getBoolean("enabled", Boolean.TRUE));
         DevicePolicyManager policy = dpm();
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
@@ -1574,6 +1605,7 @@ public class SystemBridgePlugin extends Plugin {
                     app.put("installer", installer);
                     app.put("lockTaskPermitted", isLockTaskPermitted(policy, pkg));
                     app.put("icon", encodedIcon(pm, pkg, ai));
+                    app.put("banner", encodedBanner(pm, pkg, ai));
                     apps.put(app);
                 } catch (Exception ignored) {}
             }
@@ -1584,15 +1616,112 @@ public class SystemBridgePlugin extends Plugin {
         });
     }
 
+    // Square icons are rasterised at 256px because the home screen's featured
+    // slot renders one at 115 CSS px on a devicePixelRatio-2 WebView = 230
+    // device px. The old 144px raster was upscaled by the compositor there,
+    // which is what made icons look soft (measured 2026-08-18).
+    private static final int ICON_RASTER_PX = 256;
+    // Leanback banners are 320x180dp; xhdpi ships 512x288 (verified against
+    // Disney+ on the TCL TV), and the landscape tile renders 288x176 CSS =
+    // 576x352 device px, so 512 wide is the most real detail available.
+    private static final int BANNER_RASTER_W = 512;
+    private static final int BANNER_RASTER_H = 288;
+
     // Cache the encoded icon per package + versionCode; a reinstall/update bumps
     // the version code and invalidates the stale entry automatically.
     private String encodedIcon(PackageManager pm, String pkg, ApplicationInfo ai) {
         String cacheKey = pkg + "@" + packageVersionCode(pm, pkg);
         String cached = iconCache.get(cacheKey);
         if (cached != null) return cached;
-        String encoded = drawableToBase64(pm.getApplicationIcon(ai));
+        String encoded = drawableToBase64(highestDensityIcon(pm, ai), ICON_RASTER_PX, ICON_RASTER_PX,
+            Bitmap.CompressFormat.PNG, 100);
         if (encoded != null) iconCache.put(cacheKey, encoded);
         return encoded;
+    }
+
+    // Cached separately from the icon: a package can have one and not the other.
+    private String encodedBanner(PackageManager pm, String pkg, ApplicationInfo ai) {
+        String cacheKey = "banner:" + pkg + "@" + packageVersionCode(pm, pkg);
+        String cached = iconCache.get(cacheKey);
+        if (cached != null) return cached.isEmpty() ? null : cached;
+        Drawable banner = highestDensityBanner(pm, pkg, ai);
+        // Banners are photographic brand art, so lossy WebP is the right
+        // container: the same 13 banners that cost 1 MB of base64 PNG across the
+        // bridge (measured 606ms round-trip on the TCL TV, repeated every 60s
+        // and on every foreground return) fit in a fraction of that. Icons stay
+        // PNG — they are small, have hard edges and rely on alpha.
+        String encoded = banner == null
+            ? null
+            : drawableToBase64(banner, BANNER_RASTER_W, BANNER_RASTER_H, bannerFormat(), 82);
+        // Empty string is the negative cache: most packages have no TV banner
+        // and re-resolving one costs a Resources load per getInstalledApps call.
+        iconCache.put(cacheKey, encoded == null ? "" : encoded);
+        return encoded;
+    }
+
+    /**
+     * getApplicationIcon() resolves against the *display's* density. This TV
+     * reports densityDpi=320 (xhdpi), so it hands back the 96px xhdpi icon even
+     * when the package also ships a 192px xxxhdpi one (verified by unzipping
+     * Disney+: mipmap-xhdpi 96px, mipmap-xxxhdpi 192px, adaptive foreground
+     * 432px). Ask for the densest variant explicitly and fall back down the
+     * ladder, so the rasteriser has real pixels to work with instead of an
+     * upscale of a small bitmap.
+     */
+    private Drawable highestDensityIcon(PackageManager pm, ApplicationInfo ai) {
+        Drawable best = drawableForDensity(pm, ai.packageName, ai.icon);
+        return best != null ? best : pm.getApplicationIcon(ai);
+    }
+
+    /**
+     * The Leanback banner is what the stock Google TV launcher shows for an app
+     * — wide art with the brand lockup already composed, rather than a square
+     * icon floating on a generated gradient. Prefer the launch activity's own
+     * banner (apps may override per-activity) and fall back to the application
+     * banner; returns null for packages that ship neither, which is every
+     * non-TV app.
+     */
+    private Drawable highestDensityBanner(PackageManager pm, String pkg, ApplicationInfo ai) {
+        int bannerRes = 0;
+        try {
+            Intent leanback = pm.getLeanbackLaunchIntentForPackage(pkg);
+            if (leanback != null && leanback.getComponent() != null) {
+                ActivityInfo activity = pm.getActivityInfo(leanback.getComponent(), 0);
+                if (activity != null && activity.banner != 0) bannerRes = activity.banner;
+            }
+        } catch (Exception ignored) {}
+        if (bannerRes == 0) bannerRes = ai.banner;
+        if (bannerRes == 0) return null;
+        Drawable scaled = drawableForDensity(pm, pkg, bannerRes);
+        if (scaled != null) return scaled;
+        try {
+            return pm.getDrawable(pkg, bannerRes, ai);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /** Densest available variant of one drawable resource, or null. */
+    private Drawable drawableForDensity(PackageManager pm, String pkg, int resId) {
+        if (resId == 0 || pkg == null) return null;
+        Resources res;
+        try {
+            res = pm.getResourcesForApplication(pkg);
+        } catch (Exception ignored) {
+            return null;
+        }
+        int[] ladder = {
+            DisplayMetrics.DENSITY_XXXHIGH,
+            DisplayMetrics.DENSITY_XXHIGH,
+            DisplayMetrics.DENSITY_XHIGH,
+        };
+        for (int density : ladder) {
+            try {
+                Drawable candidate = res.getDrawableForDensity(resId, density, null);
+                if (candidate != null) return candidate;
+            } catch (Exception ignored) {}
+        }
+        return null;
     }
 
     private long packageVersionCode(PackageManager pm, String pkg) {
@@ -1617,20 +1746,59 @@ public class SystemBridgePlugin extends Plugin {
         }
     }
 
-    private String drawableToBase64(Drawable drawable) {
+    /**
+     * Rasterises a drawable at up to maxW x maxH, preserving aspect ratio and —
+     * critically — never enlarging past the drawable's own intrinsic size. The
+     * previous version always drew at a fixed 144px, which *upscaled* the 96px
+     * xhdpi icons this TV resolves; that upscale is unrecoverable blur, and the
+     * WebView then resampled a second time to reach its render size. Clamping
+     * to the intrinsic size means a small source stays small and sharp, and the
+     * browser does one clean downscale instead of following an upscale.
+     */
+    @SuppressWarnings("deprecation")
+    private static Bitmap.CompressFormat bannerFormat() {
+        // WEBP_LOSSY arrived in API 30; the plain WEBP constant is lossy below
+        // quality 100 on older releases and is what this Android 9 TV has.
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+            ? Bitmap.CompressFormat.WEBP_LOSSY
+            : Bitmap.CompressFormat.WEBP;
+    }
+
+    private String drawableToBase64(Drawable drawable, int maxW, int maxH,
+                                    Bitmap.CompressFormat format, int quality) {
+        if (drawable == null) return null;
         try {
-            int size = 144;
+            int intrinsicW = drawable.getIntrinsicWidth();
+            int intrinsicH = drawable.getIntrinsicHeight();
+            int targetW = maxW;
+            int targetH = maxH;
+            if (intrinsicW > 0 && intrinsicH > 0) {
+                // Fit inside the box without distorting, and without upscaling.
+                double scale = Math.min(
+                    (double) maxW / intrinsicW,
+                    (double) maxH / intrinsicH);
+                if (scale > 1.0) scale = 1.0;
+                targetW = Math.max(1, (int) Math.round(intrinsicW * scale));
+                targetH = Math.max(1, (int) Math.round(intrinsicH * scale));
+            }
+
             Bitmap bitmap;
-            if (drawable instanceof BitmapDrawable && ((BitmapDrawable) drawable).getBitmap() != null) {
-                bitmap = Bitmap.createScaledBitmap(((BitmapDrawable) drawable).getBitmap(), size, size, true);
+            Bitmap source = drawable instanceof BitmapDrawable
+                ? ((BitmapDrawable) drawable).getBitmap() : null;
+            if (source != null) {
+                bitmap = source.getWidth() == targetW && source.getHeight() == targetH
+                    ? source
+                    : Bitmap.createScaledBitmap(source, targetW, targetH, true);
             } else {
-                bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+                // Vector/adaptive icons have no backing bitmap: draw them at the
+                // target size directly, which is a true re-render, not a resample.
+                bitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888);
                 Canvas canvas = new Canvas(bitmap);
-                drawable.setBounds(0, 0, size, size);
+                drawable.setBounds(0, 0, targetW, targetH);
                 drawable.draw(canvas);
             }
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            bitmap.compress(Bitmap.CompressFormat.PNG, 90, out);
+            bitmap.compress(format, quality, out);
             return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
         } catch (Exception e) {
             return null;
@@ -1757,15 +1925,117 @@ public class SystemBridgePlugin extends Plugin {
         }
     }
 
+    // D12 (stage5-opus-test.md): 4s was short for Android 9 TV Wi-Fi scans and
+    // could time out into stale/incomplete cached results before the real
+    // SCAN_RESULTS_AVAILABLE_ACTION broadcast arrived.
+    private static final long WIFI_SCAN_TIMEOUT_MS = 8000L;
+    private BroadcastReceiver wifiScanReceiver;
+    private final Object wifiScanLock = new Object();
+    private Runnable wifiScanTimeout;
+    // D12 (stage5-opus-test.md): a second concurrent scanWifi() used to
+    // unregister the first scan's receiver/timeout and silently strand its
+    // PluginCall forever ("Scanning…" never resolves). Track the in-flight
+    // call so a superseding scan can reject it with a distinct code instead.
+    private PluginCall inFlightWifiScanCall;
+
+    /**
+     * Android's system location toggle gates Wi-Fi scan *results* independently
+     * of the ACCESS_FINE_LOCATION permission this method already holds by the
+     * time it's called — with Location off, startScan() still "succeeds" but
+     * getScanResults() silently returns stale/empty data forever (H5). Surface
+     * that as its own distinct error instead of a mysterious empty list.
+     */
+    private boolean isLocationServicesEnabled() {
+        LocationManager lm = (LocationManager) getContext().getSystemService(Context.LOCATION_SERVICE);
+        if (lm == null) return true; // can't tell; don't block the scan on it
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                return lm.isLocationEnabled();
+            }
+            @SuppressWarnings("deprecation")
+            int mode = Settings.Secure.getInt(
+                getContext().getContentResolver(), Settings.Secure.LOCATION_MODE,
+                Settings.Secure.LOCATION_MODE_OFF);
+            return mode != Settings.Secure.LOCATION_MODE_OFF;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
     @SuppressWarnings("deprecation")
-    private void doWifiScan(PluginCall call) {
-        WifiManager wifi = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+    private void doWifiScan(final PluginCall call) {
+        final WifiManager wifi = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         if (!wifi.isWifiEnabled()) {
             call.reject("Wi-Fi is disabled", "WIFI_DISABLED");
             return;
         }
+        if (!isLocationServicesEnabled()) {
+            call.reject(
+                "Location Services must be on for this device to see nearby Wi-Fi networks.",
+                "LOCATION_SERVICES_DISABLED");
+            return;
+        }
 
-        wifi.startScan(); // results may be from cache if throttled; still real data
+        if (wifiScanReceiver != null) {
+            try { getContext().unregisterReceiver(wifiScanReceiver); } catch (Exception ignored) {}
+            wifiScanReceiver = null;
+        }
+        synchronized (wifiScanLock) {
+            if (wifiScanTimeout != null) {
+                mainHandler.removeCallbacks(wifiScanTimeout);
+                wifiScanTimeout = null;
+            }
+        }
+        if (inFlightWifiScanCall != null && inFlightWifiScanCall != call) {
+            try {
+                inFlightWifiScanCall.reject(
+                    "A newer Wi-Fi scan was started before this one finished",
+                    "SCAN_SUPERSEDED");
+            } catch (Exception ignored) {}
+        }
+        inFlightWifiScanCall = call;
+
+        wifiScanReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                boolean success = intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, true);
+                finishWifiScan(call, wifi, success);
+            }
+        };
+        getContext().registerReceiver(
+            wifiScanReceiver, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
+
+        boolean started = wifi.startScan();
+        // H5/H6: wait for the real SCAN_RESULTS_AVAILABLE_ACTION broadcast
+        // instead of reading getScanResults() immediately (which returns
+        // whatever was cached from the last scan, throttled or not). If the
+        // system throttles/refuses the scan outright, or the broadcast never
+        // arrives, still resolve with whatever is cached rather than hanging
+        // the UI's "Scanning…" state forever.
+        synchronized (wifiScanLock) {
+            wifiScanTimeout = () -> finishWifiScan(call, wifi, false);
+            mainHandler.postDelayed(wifiScanTimeout, WIFI_SCAN_TIMEOUT_MS);
+        }
+        if (!started) {
+            Log.w(LOG_TAG, "wifi.startScan() returned false — falling back to cached results");
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void finishWifiScan(PluginCall call, WifiManager wifi, boolean freshResults) {
+        synchronized (wifiScanLock) {
+            if (wifiScanTimeout != null) {
+                mainHandler.removeCallbacks(wifiScanTimeout);
+                wifiScanTimeout = null;
+            }
+        }
+        if (wifiScanReceiver != null) {
+            try { getContext().unregisterReceiver(wifiScanReceiver); } catch (Exception ignored) {}
+            wifiScanReceiver = null;
+        }
+        if (inFlightWifiScanCall == call) {
+            inFlightWifiScanCall = null;
+        }
 
         String currentSsid = null;
         WifiInfo info = wifi.getConnectionInfo();
@@ -1865,12 +2135,21 @@ public class SystemBridgePlugin extends Plugin {
         if (password == null || password.isEmpty()) {
             configuration.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
         } else {
+            // Without this, Android treats the network as open even though a
+            // preSharedKey is set, so WPA/WPA2-PSK networks never actually
+            // associate (C2: silent 25s connect timeout on a correct password).
+            configuration.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
             configuration.preSharedKey = quoteWifiValue(password);
         }
 
         int networkId = wifi.addNetwork(configuration);
-        if (networkId < 0 || !wifi.enableNetwork(networkId, true)) {
-            call.reject("Android rejected the network request", "WIFI_REJECTED");
+        if (networkId < 0) {
+            call.reject("Android rejected the network configuration", "WIFI_REJECTED");
+            return;
+        }
+        if (!wifi.enableNetwork(networkId, true)) {
+            call.reject("Android could not enable the network (check the password)",
+                    "WIFI_ENABLE_FAILED");
             return;
         }
         wifi.reconnect();
@@ -2394,6 +2673,31 @@ public class SystemBridgePlugin extends Plugin {
         );
     }
 
+    private boolean isTelevisionDevice() {
+        PackageManager pm = getContext().getPackageManager();
+        int uiModeType = ((android.app.UiModeManager) getContext()
+                .getSystemService(Context.UI_MODE_SERVICE)).getCurrentModeType();
+        return uiModeType == Configuration.UI_MODE_TYPE_TELEVISION
+            || pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+    }
+
+    /**
+     * The literal recovery instruction for a non-Device-Owner Google TV where
+     * OpenPanel cannot become the HOME resolver by itself (no permission to
+     * disable the OEM launcher — see BRIEF.md / README "Kiosk and exit-kiosk on
+     * TV"). Shared between enableKioskLock's rejection and the Admin Panel's
+     * "Set OpenPanel as Home launcher" row so the two say exactly the same thing
+     * (item 7: no never-green "Choose" button that can't actually work here).
+     */
+    private String nonDoTvHomeRecoveryMessage() {
+        ComponentName currentHome = findSystemHomeComponent();
+        String recoveryPackage = currentHome != null
+            ? currentHome.getPackageName() : "<the device's current launcher>";
+        return "OpenPanel can't become this TV's Home launcher on its own without Device Owner. "
+            + "Run \"adb shell pm disable-user --user 0 " + recoveryPackage
+            + "\" from a computer on the same network, then reopen Admin Panel and try again.";
+    }
+
     private String homeControlMode() {
         return LauncherState.homeControlMode(
             getContext().getPackageName(),
@@ -2451,24 +2755,152 @@ public class SystemBridgePlugin extends Plugin {
         PackageManager packageManager = getContext().getPackageManager();
         Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
         List<ResolveInfo> candidates = packageManager.queryIntentActivities(home, 0);
-        ComponentName fallback = null;
+        return selectSystemHomeComponent(candidates, getContext().getPackageName());
+    }
+
+    /**
+     * Plain (package, class) pair, used instead of ComponentName inside the
+     * pure selection/matching helpers below. android.content.ComponentName's
+     * methods all throw "not mocked" under the plain JVM unit-test jar (no
+     * Robolectric in this project — see other *Test.java files), so the
+     * unit-testable core avoids calling any ComponentName method; only the
+     * PackageManager-facing wrappers (findSystemHomeComponent,
+     * findDisabledLauncherComponent) construct/read real ComponentName
+     * objects, and those aren't exercised by unit tests.
+     */
+    static final class HomeCandidate {
+        final String packageName;
+        final String className;
+        HomeCandidate(String packageName, String className) {
+            this.packageName = packageName;
+            this.className = className;
+        }
+    }
+
+    /**
+     * Pure selection logic over a candidate list, split out from
+     * findSystemHomeComponent() so it is unit-testable without PackageManager.
+     *
+     * Answers "does any non-fallback HOME resolver exist?" rather than
+     * returning the first FLAG_SYSTEM candidate: iterates every candidate,
+     * skips OpenPanel itself and anything looksLikeFallbackHomeClassName()
+     * flags, then among what remains prefers a system candidate but accepts a
+     * non-system one. Returns null only when every candidate is a fallback
+     * (or the list is empty) — that is the one case Exit Kiosk should refuse.
+     */
+    static HomeCandidate selectSystemHomeCandidate(List<ResolveInfo> candidates, String selfPackage) {
+        HomeCandidate systemCandidate = null;
+        HomeCandidate nonSystemCandidate = null;
 
         for (ResolveInfo candidate : candidates) {
-            if (candidate.activityInfo == null) continue;
+            if (candidate == null || candidate.activityInfo == null) continue;
             String packageName = candidate.activityInfo.packageName;
-            if (getContext().getPackageName().equals(packageName)) continue;
+            if (selfPackage != null && selfPackage.equals(packageName)) continue;
+            if ("com.android.settings".equals(packageName)) continue;
 
-            ComponentName component = new ComponentName(
-                packageName, candidate.activityInfo.name);
-            if (!"com.android.settings".equals(packageName)) {
-                if ((candidate.activityInfo.applicationInfo.flags
-                        & ApplicationInfo.FLAG_SYSTEM) != 0) {
-                    return component;
-                }
-                if (fallback == null) fallback = component;
+            String className = candidate.activityInfo.name;
+            if (looksLikeFallbackHomeClassName(className)) continue;
+
+            boolean isSystem = candidate.activityInfo.applicationInfo != null
+                && (candidate.activityInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+            HomeCandidate resolved = new HomeCandidate(packageName, className);
+            if (isSystem) {
+                if (systemCandidate == null) systemCandidate = resolved;
+            } else {
+                if (nonSystemCandidate == null) nonSystemCandidate = resolved;
             }
         }
-        return fallback;
+
+        if (systemCandidate != null) return systemCandidate;
+        return nonSystemCandidate; // null when every candidate was a fallback
+    }
+
+    static ComponentName selectSystemHomeComponent(List<ResolveInfo> candidates, String selfPackage) {
+        HomeCandidate selected = selectSystemHomeCandidate(candidates, selfPackage);
+        return selected != null ? new ComponentName(selected.packageName, selected.className) : null;
+    }
+
+    /**
+     * Finds the specific non-fallback launcher that is currently DISABLED, so
+     * the refusal-path recoveryCommand can name the package that actually
+     * needs `pm enable`, instead of the fallback that's already enabled (V2).
+     * Re-queries HOME resolvers with MATCH_DISABLED_COMPONENTS so disabled
+     * candidates are visible at all (queryIntentActivities(..., 0) omits
+     * them), then checks each non-fallback candidate's actual enabled state
+     * via getComponentEnabledSetting / its manifest default.
+     */
+    private ComponentName findDisabledLauncherComponent() {
+        PackageManager packageManager = getContext().getPackageManager();
+        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+        List<ResolveInfo> candidates = packageManager.queryIntentActivities(
+            home, PackageManager.MATCH_DISABLED_COMPONENTS);
+        String selfPackage = getContext().getPackageName();
+
+        for (ResolveInfo candidate : candidates) {
+            if (candidate == null || candidate.activityInfo == null) continue;
+            String packageName = candidate.activityInfo.packageName;
+            if (selfPackage.equals(packageName)) continue;
+            if ("com.android.settings".equals(packageName)) continue;
+
+            ComponentName component = new ComponentName(packageName, candidate.activityInfo.name);
+            if (looksLikeFallbackHomeComponent(component)) continue;
+
+            int setting = packageManager.getComponentEnabledSetting(component);
+            boolean disabled = setting == PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                || setting == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+                || setting == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED;
+            if (disabled) return component;
+        }
+        return null;
+    }
+
+    /**
+     * exitKioskToSystemHome() disables OpenPanel's HOME alias so Android falls
+     * back to whatever other HOME resolver is enabled. On a non-Device-Owner TV
+     * where the OEM launcher was disabled by hand to arm kiosk (this app cannot
+     * re-enable it — no permission, see README "Google TV and Android TV"), the
+     * only thing left to resolve HOME can be a minimal system "fallback" screen
+     * that just shows black and never runs KioskBootReceiver on a reboot either.
+     * Launching Home into that component stranded a real device on 2026-08-17
+     * (see BRIEF.md).
+     *
+     * Tried and rejected: requiring the candidate to also answer
+     * CATEGORY_LAUNCHER/CATEGORY_LEANBACK_LAUNCHER. That seemed like a generic
+     * "is this a real launcher" signal, but on-device testing (TCL, Android 9)
+     * showed the real OEM launcher (com.google.android.tvlauncher) does *not*
+     * register itself under those categories either — a launcher lists other
+     * apps under LEANBACK_LAUNCHER, it doesn't have to list itself. That check
+     * would have refused Exit Kiosk even in the ordinary, safe case.
+     *
+     * What actually is OEM-independent: AOSP's TV framework and every fallback
+     * implementation observed so far (TCL's own, and AOSP TV Settings' own) name
+     * the component class literally "FallbackHome" — it is the documented AOSP
+     * convention (frameworks/base ... FallbackHome), not a TCL-specific string.
+     * Matching the short class name is therefore the accurate, still-generic
+     * signal, not a package-name allowlist.
+     */
+    /**
+     * ComponentName-accepting convenience wrapper. Only called from
+     * PackageManager-facing code (real device); not used by unit tests
+     * because ComponentName's getters throw under the plain unit-test jar.
+     */
+    static boolean looksLikeFallbackHomeComponent(ComponentName home) {
+        if (home == null) return true; // nothing resolved at all — treat as unsafe
+        return looksLikeFallbackHomeClassName(home.getClassName());
+    }
+
+    /**
+     * Pure string form, safe to unit test without any Android framework
+     * class. Matches a "FallbackHome" prefix on the class's simple name (not
+     * just an exact match) so OEM variants like "FallbackHomeActivity" are
+     * still caught per stage2-opus.md's hardening note. className may be a
+     * short form (e.g. ".FallbackHome") or fully-qualified.
+     */
+    static boolean looksLikeFallbackHomeClassName(String className) {
+        if (className == null) return true; // nothing resolved at all — treat as unsafe
+        int lastDot = className.lastIndexOf('.');
+        String simpleName = lastDot >= 0 ? className.substring(lastDot + 1) : className;
+        return simpleName.startsWith("FallbackHome");
     }
 
     @PluginMethod
@@ -2497,6 +2929,7 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void setManagementMode(PluginCall call) {
+        if (!requireKioskAdmin(call, "setManagementMode")) return;
         String requestedMode = call.getString("mode", KioskState.MODE_COMPANION);
         boolean fireDevice = LandscapeOrientationLock.isFireDevice(
             Build.MANUFACTURER,
@@ -2553,6 +2986,7 @@ public class SystemBridgePlugin extends Plugin {
 
     @PluginMethod
     public void openLauncherSettings(PluginCall call) {
+        if (!requireKioskAdmin(call, "openLauncherSettings")) return;
         // Exit Kiosk disables the HOME alias. Re-enable it before presenting
         // the chooser so an operator can deliberately select OpenPanel again.
         setOpenPanelHomeEnabled(true);
@@ -2648,6 +3082,10 @@ public class SystemBridgePlugin extends Plugin {
         final boolean deviceOwner = dpm != null && dpm.isDeviceOwnerApp(pkg);
         final boolean fireDevice = LandscapeOrientationLock.isFireDevice(
             Build.MANUFACTURER, Build.BRAND);
+        if (!deviceOwner && !fireDevice && isTelevisionDevice() && !isDefaultLauncher()) {
+            call.reject(nonDoTvHomeRecoveryMessage(), "NO_SAFE_LAUNCHER");
+            return;
+        }
         if (KioskState.shouldUseFireRedirectKiosk(deviceOwner, fireDevice)) {
             setOpenPanelHomeEnabled(true);
             if (!DeviceAccess.isAccessibilityServiceEnabled(getContext())) {
@@ -2694,10 +3132,31 @@ public class SystemBridgePlugin extends Plugin {
                     waitForKioskStart(call, deviceOwner, strongLock, 20);
                 } catch (Exception e) {
                     KioskState.setEnabled(getContext(), false);
+                    restoreStatusBarIfLockdownApplied(deviceOwner, strongLock);
                     call.reject("Could not enter kiosk lock: " + e.getMessage(), "LOCK_FAILED");
                 }
             }
         });
+    }
+
+    /**
+     * C3: applyDeviceOwnerLockdown() above hides the status bar before
+     * startLockTask() runs. If lock task never actually starts (thrown
+     * exception, or waitForKioskStart's attempts run out), the status bar was
+     * already hidden and nothing else restores it — the admin is left with no
+     * navigation and no visible reason why. Undo the one side effect we know we
+     * applied.
+     */
+    private void restoreStatusBarIfLockdownApplied(boolean deviceOwner, boolean lockdownApplied) {
+        if (!deviceOwner || !lockdownApplied) return;
+        DevicePolicyManager policy = dpm();
+        if (policy == null) return;
+        try {
+            policy.setStatusBarDisabled(
+                OpenPanelDeviceAdminReceiver.getComponentName(getContext()), false);
+        } catch (Exception error) {
+            Log.w(LOG_TAG, "Could not restore status bar after a failed kiosk lock", error);
+        }
     }
 
     private void waitForKioskStart(
@@ -2716,6 +3175,7 @@ public class SystemBridgePlugin extends Plugin {
         }
         if (attemptsRemaining <= 0) {
             KioskState.setEnabled(getContext(), false);
+            restoreStatusBarIfLockdownApplied(deviceOwner, allowlisted);
             call.reject(
                 "Android did not enter screen pinning. Confirm the pinning prompt when shown.",
                 "LOCK_NOT_ACTIVE");
@@ -2756,15 +3216,49 @@ public class SystemBridgePlugin extends Plugin {
     @PluginMethod
     public void exitKioskToSystemHome(final PluginCall call) {
         if (!requireKioskAdmin(call, "exitKioskToSystemHome")) return;
-        KioskState.setEnabled(getContext(), false);
-        KioskState.setKeyguardDisabled(getContext(), false);
 
         getActivity().runOnUiThread(() -> {
             DevicePolicyManager policy = dpm();
             String packageName = getContext().getPackageName();
             ComponentName systemHome = findSystemHomeComponent();
+            boolean deviceOwnerNow = policy != null && policy.isDeviceOwnerApp(packageName);
 
             try {
+                // Guard decision happens before any state mutation: if we are
+                // about to refuse, kioskEnabled must remain exactly what it was
+                // (true) so the caller can tell the exit did not happen.
+                if (!deviceOwnerNow && systemHome == null) {
+                    // Deliberate divergence from "no mutation at all" (D5, stage5-opus-test.md):
+                    // we DO still stop lock task on refusal, matching BRIEF goal 2's "keep the
+                    // alias and stop lock task only". kioskEnabled stays true so the app/UI still
+                    // know they're armed, but screen pinning is released so the user isn't stuck
+                    // unable to navigate OpenPanel itself while we wait for the adb recovery step.
+                    if (lockTaskState() != ActivityManager.LOCK_TASK_MODE_NONE) {
+                        getActivity().stopLockTask();
+                    }
+                    JSObject result = new JSObject();
+                    result.put("exited", false);
+                    result.put("reason", "NO_SAFE_LAUNCHER");
+                    result.put("message",
+                        "No other launcher is available to take over Home, so OpenPanel stayed "
+                        + "put instead of leaving you on a black screen. Kiosk lock is stopped. "
+                        + "To finish exiting kiosk, re-enable the device's own launcher over adb, "
+                        + "then reopen Admin Panel → Kiosk and try again.");
+                    ComponentName disabledLauncher = findDisabledLauncherComponent();
+                    result.put("recoveryCommand",
+                        disabledLauncher != null
+                            ? "adb shell pm enable " + disabledLauncher.getPackageName()
+                            : "adb shell pm enable <the device's launcher package>");
+                    call.resolve(result);
+                    Log.w(LOG_TAG, "Exit-kiosk refused: no usable non-OpenPanel launcher would "
+                        + "resolve HOME (disabled candidate=" + (disabledLauncher != null
+                            ? disabledLauncher.flattenToShortString() : "none") + ")");
+                    return;
+                }
+
+                KioskState.setEnabled(getContext(), false);
+                KioskState.setKeyguardDisabled(getContext(), false);
+
                 if (lockTaskState() != ActivityManager.LOCK_TASK_MODE_NONE) {
                     getActivity().stopLockTask();
                 }
@@ -2943,6 +3437,7 @@ public class SystemBridgePlugin extends Plugin {
     // straight into OpenPanel. Remembered in KioskState and re-applied on launch.
     @PluginMethod
     public void setKeyguardDisabled(PluginCall call) {
+        if (!requireKioskAdmin(call, "setKeyguardDisabled")) return;
         boolean disabled = Boolean.TRUE.equals(call.getBoolean("disabled", Boolean.TRUE));
         DevicePolicyManager dpm = dpm();
         if (dpm == null || !dpm.isDeviceOwnerApp(getContext().getPackageName())) {

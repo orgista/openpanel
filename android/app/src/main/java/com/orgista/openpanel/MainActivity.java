@@ -127,6 +127,17 @@ public class MainActivity extends BridgeActivity {
             hideSystemBars();
             KioskVolumePolicy.enforceTarget(this);
             if (KioskState.shouldAutoPin(this)) pinKioskIfUnlocked();
+        } else {
+            // Losing window focus while still resumed means something is sitting
+            // on top of us — on this TCL the remote-pairing prompt does exactly
+            // that ("press and hold HOME and OK…"), and it swallows every key.
+            // To the user the remote looks dead: the TV's LED still blinks
+            // because the remote is transmitting, but OpenPanel never sees a
+            // KeyEvent. Nothing here can take focus back from a system overlay,
+            // but recording it turns an unreproducible "the remote stopped
+            // working" report into a line in the Logs tab.
+            Log.w(LOG_TAG, "Window focus lost while resumed — another window is "
+                + "on top and is receiving remote input");
         }
     }
 

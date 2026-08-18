@@ -125,10 +125,14 @@
 
         <!-- Keep HOME on a separately-toggleable alias. Exit Kiosk disables
              only this alias, so Android can immediately fall back to the OEM
-             launcher while OpenPanel remains available from the app drawer. -->
+             launcher while OpenPanel remains available from the app drawer.
+             Ships disabled (item 8/C3): a fresh install — companion or
+             standalone, before any kiosk setup — must not silently claim Home.
+             Only the standalone kiosk path (enableKioskLock, openLauncherSettings)
+             enables it, via SystemBridgePlugin.setOpenPanelHomeEnabled(true). -->
         <activity-alias
             android:name=".OpenPanelHomeActivity"
-            android:enabled="true"
+            android:enabled="false"
             android:exported="true"
             android:label="@string/title_activity_main"
             android:targetActivity=".MainActivity">

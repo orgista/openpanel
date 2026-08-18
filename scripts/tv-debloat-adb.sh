@@ -23,6 +23,19 @@ if ! adb -s "$device_serial" shell pm list features | tr -d '\r' | rg -q 'androi
   exit 1
 fi
 
+# H12: whichever package currently resolves HOME provides the device's Home
+# surface — on stock Google TV that can be com.google.android.videos, and the
+# recommendations row can depend on com.google.android.tvrecommendations. Both
+# are in the package list below; removing the live Home package here is
+# exactly the strand condition SystemBridgePlugin's exit-kiosk guard (V1/V3)
+# exists to prevent, so resolve it once up front and skip it no matter what.
+live_home_package="$(adb -s "$device_serial" shell cmd package resolve-activity \
+  -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null \
+  | tr -d '\r' | rg -o 'packageName=\S+' | head -1 | cut -d= -f2)"
+if [[ -n "$live_home_package" ]]; then
+  echo "live-home-package $live_home_package (will be skipped, not removed)"
+fi
+
 # Exact packages only. This mirrors OpenPanel's reviewed TCL/generic TV policy.
 # It deliberately excludes Settings, WebView, Play services, launchers, TV
 # input, HDMI, Wi-Fi, Bluetooth, OTA, package installation, and ADB services.
@@ -42,6 +55,11 @@ packages=(
 )
 
 for package_name in "${packages[@]}"; do
+  if [[ -n "$live_home_package" && "$package_name" == "$live_home_package" && "$action" != "restore" ]]; then
+    echo "skipped-live-home $package_name"
+    continue
+  fi
+
   if [[ "$action" == "restore" ]]; then
     if adb -s "$device_serial" shell cmd package install-existing --user 0 "$package_name" 2>/dev/null | tr -d '\r' | rg -q 'installed|Package'; then
       echo "restored $package_name"
