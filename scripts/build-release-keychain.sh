@@ -7,8 +7,11 @@ KEY_ALIAS="openpanel-production-v2"
 KEYCHAIN_ACCOUNT="openpanel-production-v2"
 KEYCHAIN_SERVICE="OpenPanel production signing key v2"
 APK="$ROOT/android/app/build/outputs/apk/release/app-release.apk"
-EXPECTED_VERSION="1.1.28"
-EXPECTED_VERSION_CODE="37"
+# Derived from the checkout so the verification cannot go stale (it was pinned to
+# 1.1.28 for months while releases moved on). verify-versions.mjs keeps these two
+# in step with each other.
+EXPECTED_VERSION="$(node -p "require('$ROOT/package.json').version")"
+EXPECTED_VERSION_CODE="$(awk '$1 == "versionCode" {print $2; exit}' "$ROOT/android/app/build.gradle")"
 
 [[ -f "$KEYSTORE" ]] || {
   echo "Missing production keystore: $KEYSTORE" >&2
