@@ -1117,6 +1117,66 @@ emulator or physical-device pass. The current workstation has the API 37.1
 platform files but not an Android 17 runtime image, so installability is
 build-reviewed rather than claimed as physical API 37 validation.
 
+### Google TV app art and home-screen rendering
+
+Measured on the TCL "Smart TV" (Android 9, 1920x1080, `densityDpi=320`) on
+2026-08-18. The WebView reports a **960x540 CSS viewport at devicePixelRatio 2**,
+so every CSS pixel on that panel is two device pixels — the single most
+important number when reasoning about how sharp anything looks there.
+
+**Icon resolution.** `getApplicationIcon()` resolves against the display
+density, so on this TV it returns the **xhdpi** icon — 96x96 for a typical app
+(verified by unzipping Disney+: `mipmap-xhdpi` 96px, `mipmap-xxxhdpi` 192px,
+adaptive foreground 432px). The old pipeline then rasterised that to a fixed
+144px, i.e. it *upscaled* before the WebView downscaled again, and an upscale is
+unrecoverable blur. `SystemBridgePlugin.drawableForDensity()` now asks for
+`DENSITY_XXXHIGH` and walks down, and `drawableToBase64()` fits the drawable
+into its target box **without ever enlarging past the intrinsic size**.
+
+**Banners.** Apps that appear in the stock Google TV launcher ship a Leanback
+banner (320x180dp; 512x288 at xhdpi). `getInstalledApps()` now returns it as
+`banner`, and the home row uses it as the tile art, which is what the stock
+launcher shows. Two rules learned the hard way:
+
+- Banner art is **tile-only**. Stretching a 512x288 banner across the 1920px
+  hero upscales it ~6x and looks far worse than the gradient + icon treatment.
+  `ContentItem.bannerUrl` is deliberately separate from `imageUrl` for this.
+- A tile showing a banner prints **no title label** — the banner already carries
+  the wordmark, and overlaying the app name double-prints the brand and covers
+  art (Pluto TV's tagline was the giveaway).
+
+**Home-screen smoothness.** The TV idles at a clean 60fps; all jank came from
+what happens when selection changes. Isolated by measurement, not guesswork:
+
+| Change | p95 frame | worst frame |
+| --- | --- | --- |
+| Baseline (1.1.52) | 150ms | 250ms |
+| After all fixes (1.1.56), synthetic scrub | 67ms | 117ms |
+| After all fixes, real D-pad presses | **26ms** | 100ms |
+
+What actually mattered, in order:
+
+1. **The hero is the expensive thing.** Hiding it alone took the p95 from 138ms
+   to 50ms. It is a full-width 1920x624 surface with two gradient overlays.
+2. **Do not repaint it while the user scrubs.** `useSettledValue(featured, 220)`
+   holds the hero until focus stops moving — the stock Google TV home behaves
+   the same way, with the highlight moving instantly and the detail area
+   catching up. `useDeferredValue` was tried first and was not enough.
+3. **Promote the animating layers.** `will-change: opacity` on the hero's
+   cross-fading art and `contain: layout paint` on the hero itself halved the
+   p95 on their own; `will-change: transform` on the tile does the same for the
+   512x288 banner bitmap it now carries.
+4. **`decoding="async"` on every `ArtImage`** — without it the WebView decodes
+   tile bitmaps synchronously during paint.
+5. React work was *not* the bottleneck. Memoising `ContentTile` and stabilising
+   the row callbacks is still correct (script time per focus change fell), but
+   on its own it moved the frame numbers very little. Measure before optimising
+   React on this device.
+
+Do not "fix" the hero by re-adding an `AnimatePresence` keyed on the item id.
+That remounts the whole subtree on every D-pad step, which also destroys the
+focused Open button and drops focus to `<body>`.
+
 ### Google TV input behaviour
 
 - OpenPanel detects television UI mode, Leanback support, touch availability,
@@ -1403,9 +1463,64 @@ provisioning commands are in
 **Live TV state (2026-08-17):** the Google TV at `192.168.1.189` (TCL "Smart TV",
 Android 9, device `BeyondTV`) is *not* ArborXR-managed; it runs
 `com.orgista.openpanel.debug` signed with the Mac Studio debug key, upgraded over
-adb from 1.1.47-debug to **1.1.48-debug** (channel-art fix) in place. HOME on that
-TV resolves to `com.tcl.keycustomfunctionservice/.FallbackHome`, i.e. OpenPanel
-is launched, not the system launcher. It shows up in
+adb from 1.1.47-debug to **1.1.48-debug** (channel-art fix) in place. It is *not*
+Device Owner (`dumpsys device_policy` lists no admins), so kiosk on this TV is
+plain "OpenPanel owns HOME" and is **adb-assisted in both directions**:
+
+- **Kiosk was armed by hand** — `pm disable-user --user 0
+  com.google.android.tvlauncher` (the stock launcher's HOME filter is
+  `priority=2`, so a third-party HOME alias can never out-rank it) plus the
+  OpenPanel HOME alias enabled. `tvlauncher` is in `DebloatCatalog`'s
+  `PROTECTED_PACKAGES`, so OpenPanel never disables it itself.
+- **Exit Kiosk (Admin Panel) refuses instead of stranding on a black screen.**
+  `exitKioskToSystemHome` first asks whether *any* non-fallback HOME resolver
+  other than OpenPanel would actually win HOME
+  (`findSystemHomeComponent`/`selectSystemHomeComponent`, which iterate every
+  `queryIntentActivities` candidate, skip OpenPanel, skip anything matching the
+  `FallbackHome` prefix convention, and prefer a system launcher but accept a
+  non-system one). If a safe launcher exists, the alias is disabled and HOME is
+  fired normally. If none does — e.g. `tvlauncher` was `pm disable-user`'d and
+  no other launcher is installed — the call resolves with `exited:false`,
+  `reason:"NO_SAFE_LAUNCHER"`, and a `recoveryCommand` string
+  (`adb shell pm enable <disabled launcher package>`, derived by re-querying
+  HOME resolvers with `MATCH_DISABLED_COMPONENTS` to find the specific
+  currently-disabled non-fallback launcher — falling back to a generic
+  placeholder only when none can be identified). `kioskEnabled` is left `true`
+  on refusal (screen pinning is stopped so OpenPanel itself stays navigable
+  while the operator runs the adb command). This TV was previously stranded on
+  `com.tcl.keycustomfunctionservice/.FallbackHome` — a **black screen** that
+  survived a power cycle, since TCL's firmware also blocks `BOOT_COMPLETED` for
+  third-party apps (`prevent third party app from boot complete broadcast` in
+  logcat, so `KioskBootReceiver` never runs on this TV either) — that incident
+  is what this refusal path exists to prevent. Seen live 2026-08-17; fixed and
+  re-verified live in the Rev 2 pass (see `private/tcl-tv-handoff/stage4-sonnet-impl.md`
+  → "Rev 2").
+- **Admin gate reset (no known PIN):** the admin actions above (including
+  `exitKioskToSystemHome`) require an `adminToken` once a PIN has been set,
+  checked natively against `kiosk_admin_verifier` in
+  `shared_prefs/openpanel.device_health.v1.xml` (readable via
+  `adb shell run-as com.orgista.openpanel.debug cat shared_prefs/openpanel.device_health.v1.xml`).
+  If the PIN itself is unknown, use the on-screen **Forgot PIN?** flow (answers
+  the security question, then lets you set a new PIN) rather than clearing the
+  verifier — that keeps the record consistent end to end. As a last-resort
+  escape hatch when the security answer is also unknown, `run-as` and remove
+  the `kiosk_admin_verifier` key from that same prefs file; the native gate
+  fails open only until a verifier is stored again, then only a matching token
+  authorizes the gated calls.
+- **Recovery / finishing Exit Kiosk:** `adb shell pm enable
+  com.google.android.tvlauncher`, then HOME resolves to
+  `com.google.android.tvlauncher/.MainActivity` and OpenPanel stays launchable
+  from the Apps row (`MainActivity` keeps its `LEANBACK_LAUNCHER` entry).
+- **Re-arming kiosk:** `adb shell pm disable-user --user 0
+  com.google.android.tvlauncher` and `adb shell pm enable
+  com.orgista.openpanel.debug/com.orgista.openpanel.OpenPanelHomeActivity`,
+  then re-enable kiosk in the Admin Panel. The durable fix is to provision the
+  TV as Device Owner (standalone flow above) so OpenPanel can own HOME through
+  `addPersistentPreferredActivity` and Exit Kiosk restores the launcher on its
+  own.
+
+Current state after the 2026-08-17 recovery: `tvlauncher` enabled, OpenPanel
+HOME alias disabled, kiosk disarmed. It shows up in
 `scripts/openpanel-fleet-versions.sh` as an `adb` row when its wireless ADB is
 authorised (`adb connect 192.168.1.189:5555`).
 
@@ -1933,3 +2048,917 @@ adb exec-out "run-as com.orgista.openpanel.debug \
 
 Restore with `run-as ... tar -xf -` after a reinstall. Android's `adb backup` is
 unavailable here because the manifest sets `allowBackup="false"`.
+
+---
+
+## Field research session — 2026-08-18 (ONN 11 Pro)
+
+Reproduction and root-cause notes for an 11-item defect/feature list. **No fixes were
+applied.** Every claim below is either reproduced on hardware or traced to a specific
+line of source; where something could not be reproduced it says so explicitly.
+
+### Test rigs
+
+Two tablets are in play and they are **not** interchangeable — a finding in itself,
+since an issue reproduced on one may not exist on the other.
+
+| | ONN 11 Pro (primary) | Fire 7 |
+| --- | --- | --- |
+| Model / vendor | `100146660` / BOE `onn11TabletPro` | `KFQUWI` / Amazon `quartz` |
+| Serial | `ONN11PRO00156016` (USB) | `GR71WE05531501MX` |
+| Android | **14 (API 34)** | 11 (API 30) |
+| Display | 1840×1280 landscape @280dpi | 1024×600 @160dpi |
+| Package | `com.orgista.openpanel` (**production**) | `com.orgista.openpanel.debug` |
+| Version during session | **1.1.48 (code 57)** | 1.1.52 (code 61) |
+| Device Owner | **Yes** — "Managed-device controls available" | **No** — Amazon Parental Controls is Profile Owner |
+| Admin PIN | 4523 | different |
+
+The ONN cannot be updated from a machine lacking the **production** signing key
+(Keychain, Mac Studio). The Fire cannot be updated from a machine lacking the original
+**debug** keystore, and cannot be uninstalled at all (Profile Owner blocks it).
+
+### Driving the UI over ADB — two traps
+
+1. **`uiautomator dump` reports stale content for WebView modals.** Opening Settings
+   appeared to fail repeatedly; screenshots showed it had opened every time. Verify UI
+   state with `exec-out screencap`, and use `uiautomator` only for element bounds.
+2. **The screensaver eats the first tap** ("TAP ANYWHERE TO WAKE"). Budget a throwaway
+   tap before any interaction.
+
+---
+
+### Item 1 — Admin PIN
+
+`4523` is the **ONN's** PIN. It is rejected on the Fire, which retains an older PIN.
+Not a defect; recorded so the next session does not repeat the misdiagnosis.
+
+### Item 2 — "Forget network does not work" — CONFIRMED, platform-limited
+
+Root cause is in `SystemBridgePlugin.forgetWifi()`:
+
+- On **API 29+** it routes to `forgetSuggestedWifi()`, which calls
+  `wifi.removeNetworkSuggestions(new ArrayList<>())`. That only removes suggestions
+  **OpenPanel itself created**.
+- It **ignores the `ssid` argument entirely** on that path.
+- It **always calls `call.resolve()`**, so the UI reports success, clears the error
+  state, and re-scans — leaving the network visibly present.
+
+Verified non-destructively on both tablets (the connected SSID was not forgotten,
+since its password was not available to rejoin):
+
+```console
+$ adb shell dumpsys wifi | grep -i suggestion
+num_saved_networks_with_configured_suggestion: 0
+num_multiple_suggestions: 0
+
+$ adb shell cmd wifi list-networks
+Network Id  SSID        Security type
+0           Starbucks   wpa2-psk
+```
+
+OpenPanel owns **zero** suggestions, and the saved network was created by the system.
+So the call is a guaranteed no-op that reports success.
+
+**This is an Android platform boundary, not a simple bug.** Since Android 10 a normal
+app cannot remove a network it did not create; `getConfiguredNetworks()` is filtered and
+`removeNetwork()` is restricted. Real options: (a) act as Device Owner via
+`DevicePolicyManager` (available on the ONN, **not** on Fire), (b) deep-link to the
+system Wi-Fi panel and let the user forget it there, or (c) keep the button but surface
+an honest "managed by Android" state. What must change regardless: **stop resolving
+successfully when nothing was removed.**
+
+### Items 3 & 4 — Wi-Fi admin gating — item 4 already correct, item 3 inverted
+
+Reproduced on the ONN. As a guest, in-range networks render **"🔒 Admin only"** and
+cannot be joined. After unlocking with the PIN, each row gains **Connect**, and the
+connected network gains a red **Forget**.
+
+- **Item 4 (forget = admin-only): already the current behaviour.** No change needed.
+- **Item 3 (join without admin): the opposite of current behaviour on 1.1.48.**
+
+Note the source has since moved. `connectivityPolicy()` in `SettingsModal.tsx` on the
+1.1.52 tree already reads `canJoinWifi: true` with a comment describing exactly the
+policy item 3 asks for, so this may already be fixed between 1.1.48 and 1.1.52 —
+**re-verify on a current build before implementing.** What is definitely still missing is
+the **admin-configurable lock**: `canJoinWifi` is hardcoded, not persisted policy, so an
+admin cannot choose to restrict joining.
+
+Fire OS is a separate case: it has no in-app network list at all. Its panel reads
+"Saved networks stay in Fire OS" with a single *Add a network* button that opens the
+Fire OS picker, so items 3/4 are effectively moot there.
+
+### Item 5 — Device Health should uninstall, not just hide — PARTLY EXISTS
+
+Uninstall is already implemented: `SystemBridgePlugin` fires
+`Intent.ACTION_UNINSTALL_PACKAGE` with `EXTRA_RETURN_RESULT`, and `DeviceHealthPanel`
+renders an "Uninstall…" button. The gap is **which apps get it**:
+
+```java
+app.put("canUninstall", !isSystemApplication(info));   // user apps only
+result.put("canManageApps", deviceOwner);              // hide/restore needs Device Owner
+```
+
+- **System apps can never be uninstalled**, only hidden — correct for user 0, but it
+  means preinstalled bloat has no removal path.
+- **Hide requires Device Owner.** True on the ONN; **false on Fire**, where Device Health
+  is effectively read-only.
+
+The requested "disable if uninstall is unavailable" tier does not exist. Note that the
+useful middle ground — `pm disable-user --user 0` — is an ADB/shell capability an app
+cannot invoke for itself, which is precisely why the Fire runbook uses ADB. Realistic
+ladder: uninstall (user apps) → `setApplicationHidden` (Device Owner) → report-only.
+
+### Items 6 & 7 — Admin tab consolidation — CONFIRMED, justified
+
+Eight tabs render today: **Apps · Health · Books & Audio · YouTube · Display · Kiosk
+Lock · Logs · Security** (`ADMIN_TAB_DETAILS` in `AdminPanel.tsx`). Even at 1840px wide,
+**"Books & Audio" and "Kiosk Lock" already wrap to two lines**, so the bar is cramped on
+the *large* tablet — considerably worse on the Fire's 1024px.
+
+Requested shape: keep **Apps** and **Health**; merge **Books & Audio, YouTube, Kiosk
+Lock, Security, Display** into one tab with section headings.
+
+**Open decision: Logs.** It was not named in the merge list. Recommend it stays separate —
+it is a diagnostic surface, not content or policy, and burying it inside a long scrolling
+settings tab makes support harder. Flagging rather than assuming.
+
+**Item 6 also asks for new Books & Audio copy.** Current strings lean on the internal
+feature name. Suggested direction, matching the existing plain-spoken voice:
+
+> **Books & Audio** — "Add EPUB, PDF and audiobook files, or connect a library catalog.
+> Titles download for offline reading and listening, and nothing appears here until you
+> add it."
+
+That also satisfies the "hidden unless enabled" behaviour already in the product.
+
+### Item 8 — YouTube recommendations not tappable / no resolution control — CONFIRMED
+
+Reproduced on the ONN by playing a channel video. **Tapping the player surface reveals
+only OpenPanel's own overlay — "✕ Exit" and "⛶ Full Screen".** YouTube's native control
+bar never appears, at any tap depth. Consequences:
+
+- **No scrubber**, so a video cannot be seeked.
+- **No settings gear**, which is the only supported place a viewer picks quality.
+- **No reachable end-screen**, so YouTube's own recommendations cannot be clicked.
+
+Three contributing causes in `YouTubePlayer.tsx` / `youtube.ts`:
+
+1. A **full-surface overlay button** (`absolute inset-0 z-10`) is rendered whenever
+   controls are hidden, and takes the tap before the iframe sees it.
+2. The iframe `sandbox` is `allow-scripts allow-same-origin allow-presentation` — with
+   **no `allow-top-navigation`**, so even a delivered click on a recommendation cannot
+   navigate.
+3. `rel=0` does **not** remove related videos (behaviour changed in Sept 2018); it
+   restricts them to the same channel.
+
+**On the resolution request specifically:** `embedUrl()` sets no `vq` parameter, and
+YouTube deliberately ignores `vq` on embeds while the IFrame API's `setPlaybackQuality()`
+has been advisory-only since ~2019 — the player picks quality from bandwidth and
+viewport. **An admin "set resolution" control cannot be enforced through this embed.**
+Honest options: expose a data-saver hint and label it as a preference, or move to a
+native player — which for YouTube content carries ToS problems. Recommend deciding the
+product answer before any implementation.
+
+### Item 9 — Crash when picking a same-channel recommendation — MECHANISM IDENTIFIED
+
+**Not reproduced live** (the end-of-video picker requires the video to finish, ~20 min,
+and no scrubber exists — see item 8). The mechanism is unambiguous in source:
+
+```js
+const playRelatedVideo = useCallback((video) => {
+  const player = playerRef.current;
+  if (player?.loadVideoById) player.loadVideoById(video.videoId);
+  else setVideoOverride(video.videoId);        // fallback remounts the iframe
+}, []);
+```
+
+with the player created in an effect keyed:
+
+```js
+}, [allowSameChannelRecommendations, closePlayer, item.sourceId]);
+```
+
+`videoOverride` is **absent from that dependency array**, while the iframe is
+`key={videoOverride ?? item.id}`. On the fallback path React therefore **unmounts and
+remounts the iframe**, the effect does **not** re-run, and `playerRef.current` is left
+bound to a **destroyed DOM node**. The iframe also carries a fixed
+`id="openpanel-youtube-player"`, so the replacement element reuses the id while the stale
+`Player` still points at the old one. Any subsequent call — `loadVideoById`, the
+unmount-time `destroy()`, state polling — operates on a dead player, which matches the
+reported "crashes and doesn't allow to resume normal gui".
+
+The JS-API path has a latent variant of the same problem: after `loadVideoById` the
+iframe `src` still encodes the *original* video id, so state derived from `item` and the
+actual playing video diverge.
+
+### Item 10 — Verified channel shows no icon — ROOT CAUSE FOUND
+
+The search preview in `YouTubeSearchPanel.tsx` renders the remote URL directly:
+
+```jsx
+{result.thumbnailUrl ? (
+  <img src={result.thumbnailUrl} ... />
+```
+
+The saved launcher tile does **not** — it goes through **`fetchImageAsDataUrl`**, the
+native HTTP path with IPv4-first DNS added specifically "for durable channel art"
+(commit `4cb3c07`, plus `Ipv4FirstDns.java`).
+
+So the two surfaces fetch channel art by different routes, and only one of them uses the
+hardened path. Observed on the ONN: the saved **Marques Brownlee** tile renders its
+avatar correctly, and the channel browser header shows it too — consistent with the
+preview being the only place that loads the image straight from `googleusercontent.com`
+inside the WebView. **Fix direction: route the preview through `fetchImageAsDataUrl` as
+well.** The thumbnail itself resolves fine — `YouTubeChannelResolver` scrapes `og:image`
+and returns it — so this is delivery, not lookup.
+
+### Item 11 — Absorbing personalDNSfilter into OpenPanel — BLOCKED ON LICENSING
+
+**personalDNSfilter is [GPL-2.0](https://github.com/IngoZenz/personaldnsfilter).
+OpenPanel is MIT.** GPL-2.0 is strong copyleft: forking that code into the OpenPanel APK
+would make the combined, distributed work GPL-2.0 and force OpenPanel to relicense. That
+is a licensing decision, not an engineering one, and it should be settled before any
+design work.
+
+Two further constraints, independent of licence:
+
+- **Android allows one active VPN per user.** DNS filtering via `VpnService` is
+  mutually exclusive with any other VPN, so absorbing it removes a capability rather than
+  adding one.
+- **User consent is mandatory.** No app can create a VPN silently; Android always shows
+  its own consent dialog. "Auto-enable filtering" is not achievable.
+
+The **current architecture already looks correct**: OpenPanel supervises
+`dnsfilter.android` as a separate app, reports its state, and can set it as always-on
+with `lockdown=false` when Device Owner. Verified healthy on the Fire
+(`always_on_vpn_app=dnsfilter.android`, `lockdown=0`, Private DNS off).
+
+For the "auto-detect telemetry the user can remove" half — that is a **DebloatCatalog**
+feature, not a DNS one, and needs no forking. The existing reviewed exact-name catalog
+plus the Device Health surface is the right home. Recommended path: keep supervising the
+GPL app at arm's length, and extend `DebloatCatalog` with a reviewed telemetry profile.
+If in-process filtering is truly wanted, a clean-room MIT resolver or an
+Apache/MIT-licensed library is the only route that preserves OpenPanel's licence.
+
+---
+
+### Additional defect found while investigating
+
+**The top-edge shade guard is visible over OpenPanel itself.** On the ONN the
+accessibility overlay is a live window at `frame=[0,0][1840,48]` with
+`mViewVisibility=0x0` (VISIBLE) while OpenPanel is the foreground app:
+
+```console
+$ adb shell dumpsys window windows | grep -A3 "OpenPanel top edge guard"
+mAttrs={(0,0)(fillx48) gr=TOP CENTER ... ty=2032 fmt=TRANSLUCENT
+mViewVisibility=0x0 mHaveFrame=true mObscured=false
+Frames: ... frame=[0,0][1840,48]
+```
+
+`syncShadeGuardVisibility()` is supposed to hide it when the foreground package is
+OpenPanel, but it only recomputes on accessibility events, so it can be left visible
+after a transition where the last observed window was something else. Its `onTouchEvent`
+returns `true`, so it consumes touches in a 48px band across the top — directly over the
+status-bar row that hosts the settings, Wi-Fi and Bluetooth buttons. It was *not* the
+cause of the tap failures in this session, but it should not be visible over OpenPanel.
+
+### Summary
+
+| # | Item | Status |
+| --- | --- | --- |
+| 1 | PIN 4523 | ONN only; Fire differs |
+| 2 | Forget network | **Confirmed** — silent no-op; platform-limited |
+| 3 | Wi-Fi join without admin | **Confirmed inverted** on 1.1.48; may be fixed in 1.1.52; admin lock still missing |
+| 4 | Forget = admin-only | **Already correct** |
+| 5 | Health uninstall | Partly exists; no disable tier; hide needs Device Owner |
+| 6 | Books & Audio copy + merge | Confirmed; copy proposed |
+| 7 | Tab consolidation | Confirmed; **Logs placement undecided** |
+| 8 | Recs untappable / resolution | **Confirmed**; resolution **not achievable** via embed |
+| 9 | Same-channel rec crash | Not reproduced live; **mechanism identified** |
+| 10 | Missing channel icon | **Root-caused** — preview bypasses `fetchImageAsDataUrl` |
+| 11 | personalDNSfilter fork | **Blocked** — GPL-2.0 vs MIT |
+| — | Shade guard over own header | **New defect found** |
+
+---
+
+## Follow-up research — 2026-08-18 (licensing, YouTube capability)
+
+### Relicensing personalDNSfilter — not available to us
+
+The proposal was "OSS to OSS should be OK". That is not the test. What matters is
+**compatibility direction**:
+
+- **MIT → GPL is allowed.** MIT code can be absorbed into a GPL project; the combined
+  work ships as GPL.
+- **GPL → MIT is not.** [GPL-2.0](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
+  §2 requires derivative works to be licensed *as a whole* under the GPL. Stripping
+  copyleft is exactly what it forbids.
+
+**Only the copyright holders can relicense**, and this project does not have one. GitHub
+reports **15 distinct contributors**:
+
+| Contributor | Commits |
+| --- | ---: |
+| IngoZenz | 838 |
+| Ridje | 30 |
+| acsway878787, smed79 | 4 each |
+| TheEvilSkeleton | 2 |
+| 10 others | 1 each |
+
+A relicence therefore needs written agreement from **all 15**, or the removal and
+clean-room rewriting of every non-consenting contribution. The long tail is small
+(1–4 commits each) so it is not theoretically impossible, but it depends on tracing and
+getting agreement from ten drive-by contributors, some from years ago.
+
+**Ranked options:**
+
+1. **Keep supervising it as a separate app (current architecture).** GPL's "mere
+   aggregation" clause covers shipping two independent apps on one device. Zero legal
+   risk, already implemented, already verified working on the Fire. **Recommended.**
+2. **Ask Ingo Zenz for a dual licence** (`GPL-2.0 OR MIT`). Costs one email. He still
+   needs the other 14 to agree, so treat a yes as the start of the process, not the end.
+3. **Clean-room MIT resolver**, or an Apache/MIT-licensed DNS library. Preserves
+   OpenPanel's licence at the cost of building and maintaining a resolver.
+4. **Relicense OpenPanel to GPL.** Legal, and almost certainly unacceptable for this
+   product.
+
+Note this changes nothing about the two hard Android constraints already documented:
+one active VPN per user, and mandatory user consent for `VpnService`. Absorbing the
+filter would not remove either.
+
+### YouTube — what is fixable, and what is not
+
+**Fixable, straightforwardly:**
+
+- **Item 9 (crash on same-channel pick).** Add `videoOverride` to the player effect's
+  dependency array, or stop remounting via `key` and drive playback solely through
+  `loadVideoById`. Drop the fixed iframe `id` in favour of a ref.
+- **Item 10 (missing channel icon).** Route the search preview through
+  `fetchImageAsDataUrl`, as the launcher tile already does.
+- **Item 8 (recommendations untappable).** Remove or shrink the full-surface overlay
+  button, and add `allow-top-navigation-by-user-activation` to the iframe sandbox.
+
+**Video resolution — not as an admin setting.** Confirmed against
+[YouTube's player parameters](https://developers.google.com/youtube/player_parameters):
+there is **no `vq` or equivalent quality parameter**, and `setPlaybackQuality()` has been
+advisory-only since ~2019. An enforced "always 720p" is not achievable through an embed.
+
+**What ReVanced does, and why it does not transfer.** ReVanced is a *patcher*: it
+rewrites the official YouTube APK's bytecode (Kotlin patches over smali) and hooks the
+native client's own quality API on each video start. That works because it is modifying
+YouTube's real app, which has an internal quality selector. OpenPanel embeds the **web**
+player and has no such surface. Adopting the approach would also mean shipping a patched
+YouTube APK — a YouTube ToS violation, and an unacceptable risk for a child-facing kiosk.
+Worth noting even ReVanced users report the setting
+[sticking at a lower quality](https://github.com/ReVanced/ravanced-patches/issues/3872)
+once an unavailable resolution is requested.
+
+**The realistic answer for quality: stop hiding YouTube's own controls.** Fixing item 8's
+overlay makes YouTube's native control bar reachable, which includes its settings gear —
+the one supported place a viewer selects quality. That converts "add an admin resolution
+setting" (impossible) into "let the user pick quality" (already built by YouTube).
+
+### Proposed per-source playback policy
+
+The request to treat single videos and channels differently is sound, and maps cleanly
+onto supported parameters. Approving a whole channel is a broader grant than approving
+one video, so the player can justifiably be more permissive.
+
+| Behaviour | Single video | Channel |
+| --- | --- | --- |
+| `autoplay=1` | yes | yes |
+| `cc_load_policy=1` (captions on) | **yes** | optional |
+| Close when finished | **yes** — `ENDED` → `closePlayer()` | no — show same-channel picker |
+| YouTube native controls | minimal | **full** (quality, captions, speed) |
+| Same-channel recommendations | no | yes |
+
+`cc_load_policy=1` and `cc_lang_pref` are both still supported, so captions-on-by-default
+is a one-line change to `embedUrl()`. The close-on-finish path already exists — the
+`onStateChange` handler treats `ENDED` as "return to OpenPanel" when same-channel
+recommendations are off. What is missing is that these are currently **global**, not
+per-source: `embedUrl()` takes only the source, and `allowSameChannelRecommendations` is
+a single setting. Making the policy a property of the approved source is the actual work.
+
+### Reference check — how Fully implements YouTube
+
+`Samples/` holds three commercial Fully Kiosk builds (do-not-redistribute; examined at
+**mechanism level only**, no code reused):
+
+| APK | Package | Version |
+| --- | --- | --- |
+| Fully Kiosk Browser | `com.fullykiosk.kiosk` | 1.60.1 |
+| Fully Single App Kiosk | `com.fullykiosk.singleapp` | 1.20.1 |
+| Fully Video Kiosk | `com.fullykiosk.videokiosk` | 1.20.1 |
+
+**Fully Video Kiosk uses the same mechanism OpenPanel does** — YouTube's IFrame API
+inside a WebView. Evidence from its dex:
+
+```text
+tag.src = "https://www.youtube.com/iframe_api";
+function onYouTubeIframeAPIReady() { ... }
+<title>Fully YouTube Player</title>
+^(?:https?://|//)?(?:www\.|m\.|.+\.)?(?:youtu\.be/|youtube\.com/(?:embed/|v/|shorts/ ...
+```
+
+It builds a local HTML page hosting the iframe, extracts the 11-character video ID and
+playlist ID by regex, and exposes a `fullyYtInterface` JS bridge. Its player config:
+
+```js
+playerVars: {
+  'autoplay': 1,
+  'controls': 0,
+  'loop': 1,
+  'rel': 0,
+}
+```
+
+**Two conclusions that settle the resolution question.**
+
+1. **They ship ExoPlayer and still do not use it for YouTube.** The APK contains ~30
+   `androidx.media3`/ExoPlayer references, with full `SubtitleView` and DRM handling —
+   used for local and direct-URL video files. YouTube is deliberately routed through the
+   iframe instead. A vendor with a complete native player already integrated chose not to
+   point it at YouTube, which is the expected outcome of YouTube's terms on stream
+   extraction.
+2. **They make no attempt at quality control whatsoever.** Searching the dex for
+   `setPlaybackQuality`, `suggestedQuality`, `hd1080`, `hd720`, `videoQuality` returns
+   **nothing**. Nor do they set `cc_load_policy` — their subtitle handling is entirely
+   media3, i.e. for their own playback, not YouTube.
+
+This independently corroborates the finding above: enforced resolution is not achievable
+for embedded YouTube by any legitimate route, and the market leader does not pretend
+otherwise.
+
+**Where OpenPanel should diverge:** Fully Video Kiosk is digital-signage software —
+`controls: 0` and `loop: 1` suit unattended playback with no viewer interaction.
+OpenPanel is interactive and child-facing, so `controls: 1` plus a reachable YouTube
+control bar is the correct choice, and is what makes viewer-selected quality possible.
+The per-source policy table above remains the right model.
+
+### Corrections and decisions — 2026-08-18 (later)
+
+**Item 3 — the ONN genuinely does not have the fix.** The guest-Wi-Fi change is real and
+is in current source, but it missed the build on the device by 16 seconds:
+
+```text
+a726571  2026-08-17 20:36:55  release: bump to 1.1.48 (versionCode 57)   ← on the ONN
+7233289  2026-08-17 20:37:11  settings: guests may join Wi-Fi and pair
+                              Bluetooth; forget/unpair/off stay admin
+```
+
+`7233289` is confirmed an ancestor of UI HEAD (`e008ad1`), so it ships from 1.1.49
+onward. **Fixed in code, never verified on hardware.** The remaining work is unchanged:
+`canJoinWifi` is still hardcoded `true`, so the admin-configurable lock does not exist.
+
+**Item 11 — earlier conclusion was too narrow.** The blocker is *GPL copyleft
+specifically*, not open source. Permissively-licensed OSS can be absorbed into an MIT
+product without relicensing:
+
+| Project | Licence | Usable inside OpenPanel? |
+| --- | --- | --- |
+| [personalDNSfilter](https://github.com/IngoZenz/personaldnsfilter) | **GPL-2.0** | ❌ forces the whole APK to GPL |
+| [RethinkDNS](https://github.com/celzero/rethink-app) | **Apache-2.0** | ✅ compatible |
+| [dns-shield](https://github.com/XiangWang2000/dns-shield) | **Apache-2.0** | ✅ compatible |
+| OkHttp `dnsoverhttps` | **Apache-2.0** | ✅ already a dependency |
+
+Building an equivalent is also unambiguously legal on its own terms — copyright protects
+the *expression*, not the idea of DNS filtering. Nothing stops OpenPanel implementing
+`VpnService` + a DoH resolver + blocklists directly.
+
+RethinkDNS is the closest permissive analogue (DoH/DoT/DNSCrypt, per-app firewall,
+`VpnService`, no root; Kotlin UI over a Go network stack forked from
+Jigsaw's `outline-go-tun2socks`). Note Apache-2.0 still carries obligations — retain
+`NOTICE`/attribution and the patent grant — so its notices belong in the third-party
+section, but it does **not** infect OpenPanel's MIT licence.
+
+Also unchanged by any of this: one active VPN per user, and mandatory user consent for
+`VpnService`. Those are Android limits, not licence limits.
+
+**Item 5 — decision: non-system disable, reversible.** System apps stay
+uninstall-exempt. For non-system apps the reversible tier is
+`DevicePolicyManager.setApplicationHidden`, which preserves app data and is undoable —
+available wherever OpenPanel is Device Owner (the ONN), unavailable on Fire. Note a plain
+app cannot call `setApplicationEnabledSetting` for *another* package, so Device Owner
+hide is the only in-app mechanism; ADB `pm disable-user --user 0` remains the Fire path.
+
+**Item 7 — decision: Logs keeps its own tab, debug builds only.** Gate the tab on the
+debug build type rather than merging it into the consolidated settings tab. Caveat for
+testing: the ONN runs the **production** package, so Logs will disappear from the main
+test device once this lands.
+
+**Item 2 — decision: behaviour is device-class dependent.** Where Device Owner is
+available, remove the network through `DevicePolicyManager`. On Fire OS, keep delegating
+to the Fire OS Wi-Fi picker. In both cases stop reporting success when nothing was
+removed.
+
+---
+
+## QOL scoping + Fully lockdown teardown — 2026-08-18
+
+### 1. Themes and logos (school branding)
+
+No blocker. Branding is currently compile-time: `gradientFor(packageName)` in `App.tsx`
+derives tile colours from a hash, `OpenPanelBrand` is a fixed component, and the launcher
+icon set lives in `res/mipmap-*`. A deployment-time theme needs (a) a small theme record
+(logo image, accent colour, background image/gradient, optional wordmark) stored beside
+the existing admin config, and (b) CSS custom properties replacing the current hardcoded
+`oklch(...)` literals.
+
+Two things to respect: the master content policy forbids shipping any customer's assets
+in the repo, so themes must be added post-deployment through the admin UI; and the logo
+must go through `fetchImageAsDataUrl` (see item 10 above) rather than a remote `<img>`.
+Note Fully takes a cruder route — it holds `android.permission.SET_WALLPAPER` and themes
+the *device*, not the app.
+
+### 2. Device never really sleeps — DIAGNOSED
+
+Two independent causes, neither of which is a bug in OpenPanel's own logic:
+
+```text
+screen_off_timeout        = 60000   (60s)
+sleep_timeout             = -1      (disabled)
+stay_on_while_plugged_in  = 15      ← AC|USB|WIRELESS|DOCK
+```
+
+**`stay_on_while_plugged_in = 15` means the screen can never sleep on any charger**, and
+these units live on chargers. OpenPanel does not set this — no source reference exists —
+so it came from provisioning/ADB and should be corrected there.
+
+Second, what users see instead of sleep is **OpenPanel's own in-app screensaver**: a
+WebView overlay ("Tap anywhere to wake", `App.tsx:796`) on the admin Display tab's
+`inactivityTimeout`. The backlight stays at full brightness rendering a clock. OpenPanel
+holds no wakelocks, so nothing else is keeping it awake.
+
+Fully solves the same problem with dedicated settings worth copying:
+
+| Fully key | Behaviour |
+| --- | --- |
+| `keepSleepingIfUnplugged` | allow real sleep on battery |
+| `screensaverBrightness` | dim the panel during screensaver instead of full brightness |
+| `screensaverDaydream` | hand off to Android's real Daydream/dream service |
+| `keepOnWhileFullscreen` | only hold the screen on during playback |
+| `motionDetection` (camera / acoustic / proximity) | wake on approach |
+
+Recommended: dim during the OpenPanel screensaver, let the device genuinely sleep after a
+second longer timeout, and stop provisioning `stay_on_while_plugged_in=15`.
+
+### 3. Profiles — scoping
+
+Two very different costs, and the cheap one probably answers the question.
+
+**In-app profiles (recommended for an alpha).** A profile is just a named bundle of the
+config OpenPanel already persists — allowed apps, YouTube sources, library catalogs,
+theme, kiosk policy. Switching swaps the active bundle. No OS involvement, works on Fire
+and non-Device-Owner devices, and is largely a data-model refactor: today those settings
+are single-valued in WebView storage. This is the alpha that tells you whether profiles
+are worth it.
+
+**OS-level multi-user.** A Device Owner can create secondary users with genuinely
+separate app data. Real isolation, but: unavailable on Fire (no Device Owner), slow user
+switching, storage duplication, and OpenPanel would need re-provisioning per user. Only
+worth it if profiles must be *security* boundaries rather than *presentation* ones.
+
+Start in-app; escalate only if the alpha shows a need for hard isolation.
+
+### 4. Fully lockdown teardown
+
+`Fully-Video-Kiosk-v1.20.1.apk` installed to the ONN for hands-on comparison
+(`com.fullykiosk.videokiosk`). Feature set recovered from its settings keys — **mechanism
+study only, no code reused.**
+
+**Hardware and system UI**
+
+`disableHomeButton` · `disablePowerButton` · `disableVolumeButtons` · `disableStatusBar` ·
+`disableLockscreenPulldown` · `forceImmersive` · `disableScreenshots` ·
+`disableNotifications` · `forceDndInKioskMode` · `disableKeyguard` · `disableMultiWindowApps`
+
+**App containment**
+
+`kioskAppWhitelist` · `kioskAppBlacklist` · `disableOtherApps` · `disableAndroidMarket` ·
+`disableAndroidBrowser` · `disableYouTube`
+
+**Radios and peripherals**
+
+`disableWifi` · `disableBluetooth` · `disableHotspot` · `disableCamera` ·
+`disableIncomingCalls` / `disableOutgoingCalls`
+
+**Exit protection**
+
+`kioskPin` · `kioskExitGesture` · `kioskBluetoothPin` (unlock by paired device) ·
+`kioskWifiPinAction` · `unlockKiosk` · `kioskTestMode`
+
+**Remote administration** — the biggest capability gap
+
+`remoteAdminLan` · `remoteAdminPassword` · `remoteAdminScreenshot` · `remoteAdminCamshot` ·
+`remoteAdminFileManagement` · `remoteAdminAdvertising`
+
+A built-in LAN admin server: remote screenshots, camera shots, file management, device
+control. OpenPanel has no equivalent — ArborXR covers some of it for managed fleets, but
+nothing for standalone/Fire deployments.
+
+**Presence detection**
+
+`motionDetection` with camera, acoustic and proximity backends, plus sensitivity/FPS
+tuning — used to wake from screensaver when someone approaches.
+
+**Architectural contrast worth noting.** Fully requests `REORDER_TASKS`,
+`EXPAND_STATUS_BAR`, `DISABLE_KEYGUARD`, `KILL_BACKGROUND_PROCESSES` and `WAKE_LOCK`, and
+notably **does not** request `SYSTEM_ALERT_WINDOW`, `WRITE_SETTINGS` or
+`PACKAGE_USAGE_STATS`. It achieves foreground-return with `REORDER_TASKS` and status-bar
+control with `EXPAND_STATUS_BAR`, where OpenPanel uses an accessibility service plus
+overlay windows. Fully's route needs fewer scary "special access" grants; OpenPanel's
+survives on devices where those permissions are unavailable. Neither is strictly better —
+but it explains why Fully's setup asks for less.
+
+### 5. YouTube player — already scoped
+
+See the earlier sections. Fixes identified: dependency-array/remount for the crash,
+overlay + sandbox for tappability, `fetchImageAsDataUrl` for the icon. Resolution cannot
+be admin-forced; the fix is exposing YouTube's own controls so the viewer chooses.
+
+### 6. Hard edge under the top bar — DIAGNOSED
+
+```jsx
+className="fixed top-0 left-0 right-0 h-16 ..."
+style={{ background: "linear-gradient(to bottom, oklch(11% 0 0) 60%, transparent)" }}
+```
+
+The bar is a fixed 64px with the gradient **fully opaque until 60%**, leaving only ~25px
+to reach transparent. That abrupt stop is the visible seam, worst over bright hero art.
+Fix direction: begin the fade at 0–20%, use several intermediate stops (oklch gradients
+band badly with only two), scale the height with viewport rather than pinning 64px, and
+consider `backdrop-filter: blur()` for separation that does not depend on opacity alone.
+
+### 7. Blurry / clipped app icons — TWO ROOT CAUSES
+
+In `SystemBridgePlugin.drawableToBase64()`:
+
+```java
+int size = 144;                              // fixed for every device
+drawable.setBounds(0, 0, size, size);        // adaptive icons drawn unmasked
+drawable.draw(canvas);
+```
+
+**Blur.** Every launcher icon is rasterised once at **144×144** regardless of density or
+display size, then upscaled by CSS. The ONN is 1840×1280 at 280dpi and renders hero art
+around 290 CSS px, so it is magnifying a 144px source — exactly the reported "blurrier the
+bigger the screen".
+
+**The clipped edge.** `getApplicationIcon()` returns an `AdaptiveIconDrawable` on Android
+8+, whose layers intentionally extend past the visible mask (only the central 72 of 108
+units is the safe zone). Drawing it flat into a square with no mask renders the full bleed
+including background-layer edges, producing a hard square boundary instead of the intended
+masked silhouette.
+
+Fix direction: raster at a density-aware size (or emit 2–3 sizes and let CSS choose), cap
+by `ActivityManager.getLauncherLargeIconSize()` rather than a literal, and branch on
+`AdaptiveIconDrawable` to composite background+foreground through the platform mask.
+Icons are already cached per `package@versionCode`, so a larger raster costs memory once,
+not per frame.
+
+### 8. Show the OpenPanel version in Settings (About)
+
+**Problem.** OpenPanel never displays its own version anywhere in the UI. There is no way
+to tell, from a device in hand, which build it is running.
+
+This is not cosmetic. During the 2026-08-18 session it caused real diagnostic cost: the
+ONN was on 1.1.48 while the repo was on 1.1.52, and a Wi-Fi fix that *appeared* absent
+turned out to be present in source but cut from the build by 16 seconds. Every "is this
+already fixed?" question currently requires:
+
+```sh
+adb -s <serial> shell dumpsys package com.orgista.openpanel | grep versionName
+```
+
+which needs a workstation, ADB access, and the right serial — none of which a teacher,
+parent, or support caller has.
+
+**The plumbing already exists.** `buildConfig true` is enabled in `android/app/build.gradle`
+precisely so "native code can read VERSION_NAME/APPLICATION_ID", and `BuildConfig.VERSION_NAME`
+is already consumed in `LibraryBridgePlugin.java` for the OPDS user agent:
+
+```java
+"OpenPanel/" + BuildConfig.VERSION_NAME + " (OPDS reader)"
+```
+
+Note the existing `versionName` field on the bridge is **not** OpenPanel's — it reports
+`NetworkPrivacyState.DNS_FILTER_PACKAGE`, i.e. personalDNSfilter's version, and is
+unrelated.
+
+**Scope.** Add a bridge getter returning `BuildConfig.VERSION_NAME`, `BuildConfig.VERSION_CODE`
+and `BuildConfig.APPLICATION_ID`, then render an **About** block. Suggested contents:
+
+- `OpenPanel 1.1.52 (build 61)`
+- package id — makes the debug/production distinction visible, which mattered on the ONN
+- device model and Android version — already available via the Device Health call
+- optionally the management mode and Device Owner state, which are the first things asked
+  in any support conversation
+
+**Placement.** Settings rather than the Admin Panel, so it is reachable without the PIN —
+support often needs the version from someone who does not have admin. It also pairs with
+the fleet version check added in `70c660f`: that answers "what is deployed across the
+fleet", while About answers "what is this device running right now".
+
+---
+
+## Decision: fork personalDNSfilter, or rebuild? — 2026-08-18
+
+**Recommendation: rebuild on permissive components — and only if integrated telemetry
+detection is genuinely wanted. Otherwise keep supervising the separate app.**
+
+### Why forking is the wrong trade
+
+Forking is *legal*. The cost is that GPL-2.0 applies to the whole distributed work, and
+that reaches further than the DNS feature:
+
+1. **The entire OpenPanel APK becomes GPL-2.0** — not just the filtering code.
+2. **The UI repo goes with it.** `cyberbanksy/openpanel-ui` is MIT today and is compiled
+   into the same APK, so it becomes part of the same combined work.
+3. **Source obligation on every deployment.** Each school, customer, or ArborXR-managed
+   fleet receiving the APK may demand the complete corresponding source — and is free to
+   redistribute it.
+4. **Any future commercial or proprietary licensing option closes.** Dual-licensing needs
+   copyright ownership, and 15 contributors hold it.
+5. **No patent grant.** GPL-2.0 has no explicit patent clause; Apache-2.0 does.
+6. **You inherit a Java DNS stack** to maintain, in exchange for a feature set that is not
+   the one being asked for.
+
+Point 6 is the decisive one. **The feature actually wanted — auto-detecting telemetry so a
+user can remove it — does not exist in personalDNSfilter.** Forking delivers a generic DNS
+filter that still needs the real feature built on top, and charges the entire product's
+licence for the privilege.
+
+### Why rebuilding is cheaper than it sounds
+
+DNS-only filtering does not require full packet routing. There is no need for tun2socks or
+a Go network stack — the VPN interface intercepts **IPv4 UDP/53** and everything else is
+ordinary request handling.
+
+[dns-shield](https://github.com/XiangWang2000/dns-shield) (Apache-2.0, Kotlin, ~35
+commits) implements precisely this scope: UDP/53 interception, DoH resolvers, response
+caching with query deduplication, per-app bypass and blocklist compilation. It is a
+working existence proof that the surface is small, and it is permissively licensed, so it
+can be read *and* borrowed from.
+
+The pieces OpenPanel already has:
+
+| Need | Already available |
+| --- | --- |
+| DoH client | **OkHttp** (Apache-2.0) — already a dependency; `okhttp-dnsoverhttps` module |
+| Native HTTP with IPv4-first DNS | `Ipv4FirstDns.java`, `fetchImageAsDataUrl` |
+| Package/telemetry policy surface | `DebloatCatalog` + Device Health |
+| Device Owner always-on VPN control | already implemented for the supervised app |
+
+So the genuinely new work is a `VpnService` that answers UDP/53 from a blocklist plus a
+DoH upstream. That is a contained component, not a subsystem.
+
+Reference options, all MIT-compatible: [RethinkDNS](https://github.com/celzero/rethink-app)
+(Apache-2.0, fuller featured — DoH/DoT/DNSCrypt, per-app firewall, but carries a Go stack
+forked from Jigsaw's `outline-go-tun2socks`), and [dns-shield](https://github.com/XiangWang2000/dns-shield)
+(Apache-2.0, closer to the needed scope). Apache-2.0 obligations are retained `NOTICE`
+and attribution — they do **not** affect OpenPanel's MIT licence.
+
+### The honest counter-argument
+
+Building it in-house is not free, and the status quo already works. Before committing:
+
+- **The one-VPN-per-user limit does not go away.** Whether OpenPanel owns the VPN or
+  supervises another app, only one can be active.
+- **Consent cannot be automated** either way — Android always shows its own dialog.
+- **Blocklists need maintenance** — sourcing, updating, and the false-positive risk the TV
+  DNS section already warns about, where over-blocking shared Google/CDN domains breaks
+  streaming, auth, and updates. That risk transfers to whoever owns the list.
+
+**Decision rule.** If the goal is *DNS filtering*, the current supervised architecture
+already delivers it at zero cost and zero risk — keep it. If the goal is *integrated
+telemetry detection with one-app deployment and no GPL dependency*, rebuild on
+OkHttp + a small `VpnService`, using dns-shield as the reference implementation.
+
+Either way, **do not fork personalDNSfilter.** It is the only option that changes
+OpenPanel's licence, and it is the option that delivers least of what was asked for.
+
+---
+
+## Design plan: built-in DNS filter + query log
+
+Status: **design only, nothing implemented.** Supersedes the "fork personalDNSfilter"
+option, which is rejected above on licensing grounds.
+
+### Goals
+
+1. DNS filtering inside OpenPanel, with no GPL dependency and no second app to deploy.
+2. A **query log** in the AdGuard mould — "`ads.example.com` blocked 1s ago, requested by
+   *Subway Surfers*" — so an operator can see what is actually being requested.
+3. **Unblock in one action** from that log. This is the point of the feature: over-blocking
+   is the main failure mode of DNS filtering, and today it is invisible and undiagnosable.
+4. Telemetry discovery: surface the domains a device reaches out to, so a reviewed
+   telemetry profile can be built from evidence instead of guesswork.
+
+### Non-goals
+
+- Full traffic inspection or packet routing. **DNS only** — UDP/53. No tun2socks, no Go
+  stack, no per-flow proxying.
+- Replacing `DebloatCatalog`. Package-level policy stays where it is; this adds the
+  network-level view that informs it.
+- Blocking apps that bypass DNS (hardcoded IPs, an app's own DoH). That limitation is
+  already documented in the TV DNS section and does not change.
+
+### Architecture
+
+```text
+VpnService (DNS-only)
+  └─ capture UDP/53
+       ├─ parse query (QNAME, QTYPE)
+       ├─ cache lookup ──────────────► hit: respond
+       ├─ blocklist match ───────────► blocked: synth NXDOMAIN / 0.0.0.0
+       └─ upstream via OkHttp DoH ───► allowed: forward, cache, respond
+                    │
+                    └─► QueryLog ring buffer (async, never in the resolve path)
+```
+
+Key point: the VPN interface is configured with `addDnsServer(<local>)` and a route
+covering only that address, so **only DNS leaves through the tunnel**. Everything else
+takes its normal path. This is what keeps the component small and the latency risk
+contained.
+
+Reusable today: **OkHttp** (already a dependency) for the DoH upstream,
+`Ipv4FirstDns.java` for resolution ordering, and the existing Device Owner always-on VPN
+plumbing built for the supervised app.
+
+### Query log — the part that carries the value
+
+Each entry records:
+
+| Field | Source | Notes |
+| --- | --- | --- |
+| timestamp | monotonic + wall clock | "1s ago" needs both |
+| QNAME / QTYPE | parsed query | |
+| decision | allowed / blocked / cached / upstream-failed | four states, not two |
+| matched rule | blocklist id + line | required for "why was this blocked" |
+| requesting app | UID → package | see below |
+| upstream latency | DoH round trip | surfaces resolver problems |
+
+**Per-app attribution is the hard part.** Android exposes
+`ConnectivityManager.getConnectionOwnerUid(protocol, local, remote)` from **API 29+**,
+then `PackageManager.getNameForUid(uid)`. Both test devices qualify (Fire = API 30,
+ONN = API 34). Expect gaps: shared UIDs, system resolver traffic, and queries made by
+Android itself will not always attribute cleanly. Show "System / unattributed" honestly
+rather than guessing — a wrong attribution here is worse than none, because it will be
+used to make blocking decisions.
+
+**The log must never sit in the resolution path.** Write to a bounded in-memory ring
+buffer (~1–2k entries) and let the UI poll it. DNS is latency-critical; a blocked write or
+a disk flush per query would be felt immediately across the whole device.
+
+### UI surfaces
+
+- **Device Health → DNS** already exists (currently TV-only). This becomes its home, and
+  should be un-scoped from TV.
+- **Live log view**: newest first, filter by decision and by app, search by domain.
+- **One-tap allowlist** from a blocked row — the loop that makes the feature worth
+  building. Allowlist entries persist as OpenPanel policy, not blocklist edits.
+- **Telemetry discovery view**: aggregate by domain over a window, ranked by frequency,
+  with an "add to reviewed telemetry profile" action feeding `DebloatCatalog`.
+
+Admin-gated. Query logs reveal browsing behaviour, so guest access is not appropriate even
+on a child device.
+
+### Safety and failure modes
+
+- **Fail open.** If the filter crashes or the upstream is unreachable, DNS must fall
+  through rather than black-holing the device. The existing `lockdown=false` stance exists
+  for exactly this reason and should carry over.
+- **Over-blocking is the expected failure.** The TV DNS section already documents shared
+  Google/CDN infrastructure breaking streaming, auth and updates when broad domains are
+  blocked — and this session lost `dl.google.com` to precisely that class of rule. The
+  query log is the mitigation: make the failure visible and one tap to undo.
+- **One VPN per user still applies.** Owning the VPN excludes any other VPN, exactly as
+  supervising personalDNSfilter does today. No regression, but no improvement either.
+- **Consent cannot be automated.** Android always shows its own VPN dialog.
+
+### Privacy and retention
+
+DNS logs are sensitive even on a kiosk. Defaults should be: in-memory only, bounded ring
+buffer, cleared on reboot, no export without explicit admin action. Any persistence is
+opt-in with a stated retention window. This also keeps the feature clear of the master
+content policy, since nothing observed is ever written into the repo or a build.
+
+### Phasing
+
+1. **Alpha — observe only.** VpnService + DoH upstream + query log, **no blocking at all**.
+   Delivers telemetry discovery immediately and proves latency and attribution on real
+   hardware before anything can break connectivity.
+2. **Beta — blocking with one-tap allowlist.** Add blocklist matching and the unblock loop.
+   Ship with a deliberately conservative default list.
+3. **Later — telemetry profile integration** into `DebloatCatalog`, and per-app bypass.
+
+Phase 1 is worth doing on its own merits: it answers "what is this device talking to"
+without any risk of breaking the device, and that is the question behind the original ask.
+
+### Open questions
+
+- Blocklist source and update cadence — bundled, fetched, or admin-supplied? Fetching
+  introduces a supply-chain surface the project has so far avoided.
+- Does the filter run in companion/ArborXR mode, or standalone only?
+- Fire OS has no Device Owner, so always-on cannot be enforced there — is a
+  user-dismissable VPN acceptable on that profile?
