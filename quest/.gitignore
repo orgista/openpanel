@@ -1,0 +1,16 @@
+# Build output
+build/
+app/build/
+.gradle/
+local.properties
+
+# Research/audit material — large extracted APKs, review .blend files.
+# Kept on disk, not in history.
+audits/
+
+# Raw environment-pipeline sources (16k HDRs, skydome masters). The processed
+# assets the app ships live under app/src/main and ARE tracked.
+scripts/sources/
+
+# SMB rename-aside build leftovers
+*.old.*

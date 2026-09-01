@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+  <string name="app_name">OpenPanel</string>
+  <string name="panel_title">OpenPanel</string>
+  <string name="panel_description">Select an app to launch it in Horizon OS.</string>
+  <string name="restriction_visible_packages_title">Visible packages</string>
+  <string name="restriction_visible_packages_description">Comma-separated package names. When set, only these apps appear in the launcher.</string>
+  <string name="restriction_hidden_packages_title">Hidden packages</string>
+  <string name="restriction_hidden_packages_description">Comma-separated package names to always hide from the launcher.</string>
+  <string name="restriction_show_all_apps_title">Show all apps</string>
+  <string name="restriction_show_all_apps_description">Bypass the built-in system-app curation (debugging aid).</string>
+  <string name="restriction_default_environment_title">Default environment</string>
+  <string name="restriction_default_environment_description">Environment used on first launch: immersive (dark dome) or passthrough (mixed reality).</string>
+</resources>

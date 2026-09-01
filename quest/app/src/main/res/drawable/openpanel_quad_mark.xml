@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OpenPanel Quad mark (vector port of assets/openpanel-quad-mark-transparent.svg). -->
+<vector
+  xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:aapt="http://schemas.android.com/aapt"
+  android:width="96dp"
+  android:height="96dp"
+  android:viewportWidth="96"
+  android:viewportHeight="96">
+
+  <group
+    android:pivotX="48"
+    android:pivotY="48"
+    android:scaleX="0.84"
+    android:scaleY="0.84">
+    <path
+      android:fillColor="#FAFAFA"
+      android:pathData="M21,12 h16 a9,9 0 0 1 9,9 v16 a9,9 0 0 1 -9,9 h-16 a9,9 0 0 1 -9,-9 v-16 a9,9 0 0 1 9,-9 z" />
+    <path
+      android:fillColor="#FAFAFA"
+      android:pathData="M21,50 h16 a9,9 0 0 1 9,9 v16 a9,9 0 0 1 -9,9 h-16 a9,9 0 0 1 -9,-9 v-16 a9,9 0 0 1 9,-9 z" />
+    <path
+      android:fillColor="#FAFAFA"
+      android:pathData="M59,50 h16 a9,9 0 0 1 9,9 v16 a9,9 0 0 1 -9,9 h-16 a9,9 0 0 1 -9,-9 v-16 a9,9 0 0 1 9,-9 z" />
+    <path
+      android:pathData="M63,8 h16 a9,9 0 0 1 9,9 v16 a9,9 0 0 1 -9,9 h-16 a9,9 0 0 1 -9,-9 v-16 a9,9 0 0 1 9,-9 z">
+      <aapt:attr name="android:fillColor">
+        <gradient
+          android:startX="54"
+          android:startY="8"
+          android:endX="88"
+          android:endY="42"
+          android:startColor="#7DD3FC"
+          android:endColor="#3B82F6"
+          android:type="linear" />
+      </aapt:attr>
+    </path>
+  </group>
+</vector>

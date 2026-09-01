@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+quest_root="$(cd "$script_dir/.." && pwd)"
+repo_root="$(cd "$quest_root/.." && pwd)"
+package_name="com.orgista.openpanel.quest"
+activity_name=".OpenPanelActivity"
+serial="${OPENPANEL_QUEST_SERIAL:-340YC10G8D180B}"
+launch=0
+wait_seconds=6
+out_dir=""
+
+usage() {
+  cat <<'EOF'
+Usage: quest/scripts/capture-ui [--launch] [--serial SERIAL] [--out DIR] [--wait SECONDS]
+
+Triggers MetaCam screenshot capture for OpenPanel VR and pulls the newest image
+plus lightweight ADB state into an audit directory. This does not install,
+uninstall, upload, or clear app data.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --launch)
+      launch=1
+      shift
+      ;;
+    --serial)
+      serial="${2:?missing serial}"
+      shift 2
+      ;;
+    --out)
+      out_dir="${2:?missing output directory}"
+      shift 2
+      ;;
+    --wait)
+      wait_seconds="${2:?missing wait seconds}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+adb_bin="${ADB:-$(command -v adb || true)}"
+if [[ -z "$adb_bin" ]]; then
+  echo "adb not found. Set ADB or put adb on PATH." >&2
+  exit 1
+fi
+
+if [[ -z "$out_dir" ]]; then
+  out_dir="$repo_root/audits/quest-capture-$(date +%Y%m%d-%H%M%S)"
+fi
+mkdir -p "$out_dir"
+
+if [[ "$launch" == "1" ]]; then
+  "$adb_bin" -s "$serial" shell am start \
+    -n "$package_name/$activity_name" \
+    -a android.intent.action.MAIN \
+    -c com.oculus.intent.category.VR \
+    >"$out_dir/launch.txt" 2>&1 || true
+  sleep "$wait_seconds"
+fi
+
+"$adb_bin" -s "$serial" shell am startservice \
+  -n com.oculus.metacam/.capture.CaptureService \
+  -a TAKE_SCREENSHOT \
+  >"$out_dir/metacam-start.txt" 2>&1 || true
+sleep 3
+
+latest="$("$adb_bin" -s "$serial" shell "ls -t /sdcard/Oculus/Screenshots/${package_name}-*.jpg 2>/dev/null | head -1" | tr -d '\r')"
+if [[ -z "$latest" ]]; then
+  echo "No MetaCam screenshot found for $package_name on $serial." >&2
+  exit 1
+fi
+
+"$adb_bin" -s "$serial" pull "$latest" "$out_dir/headset-metacam.jpg" >/dev/null
+"$adb_bin" -s "$serial" shell dumpsys package "$package_name" >"$out_dir/package.txt" 2>/dev/null || true
+"$adb_bin" -s "$serial" shell dumpsys display >"$out_dir/display-dumpsys.txt" 2>/dev/null || true
+"$adb_bin" -s "$serial" shell pidof "$package_name" >"$out_dir/pid.txt" 2>/dev/null || true
+if [[ -s "$out_dir/pid.txt" ]]; then
+  pid="$(tr -d '\r\n' <"$out_dir/pid.txt")"
+  "$adb_bin" -s "$serial" shell dumpsys meminfo "$pid" >"$out_dir/meminfo.txt" 2>/dev/null || true
+fi
+
+printf 'Captured %s\n' "$out_dir/headset-metacam.jpg"

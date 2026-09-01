@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Managed configuration schema (Android app restrictions). ArborXR's console
+  discovers these keys automatically once the app declares
+  `android.content.APP_RESTRICTIONS` metadata in the manifest, letting admins
+  push per-device launcher policy without a new APK.
+-->
+<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
+  <restriction
+    android:key="visible_packages"
+    android:title="@string/restriction_visible_packages_title"
+    android:description="@string/restriction_visible_packages_description"
+    android:restrictionType="string"
+    android:defaultValue="" />
+  <restriction
+    android:key="hidden_packages"
+    android:title="@string/restriction_hidden_packages_title"
+    android:description="@string/restriction_hidden_packages_description"
+    android:restrictionType="string"
+    android:defaultValue="" />
+  <restriction
+    android:key="show_all_apps"
+    android:title="@string/restriction_show_all_apps_title"
+    android:description="@string/restriction_show_all_apps_description"
+    android:restrictionType="bool"
+    android:defaultValue="false" />
+  <restriction
+    android:key="default_environment"
+    android:title="@string/restriction_default_environment_title"
+    android:description="@string/restriction_default_environment_description"
+    android:restrictionType="string"
+    android:defaultValue="immersive" />
+</restrictions>
