@@ -23,8 +23,8 @@ android {
     // HorizonOS is Android 14 (API level 34)
     //noinspection OldTargetApi,ExpiredTargetSdkVersion
     targetSdk = 34
-    versionCode = 64
-    versionName = "0.3.52"
+    versionCode = 65
+    versionName = "0.3.53"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

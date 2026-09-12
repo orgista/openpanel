@@ -207,3 +207,41 @@ denoise off, one variable per render, compare with amplified diff maps
 (PIL ImageChops, ×4 gain). Structural silhouettes in the diff = real change;
 uniform speckle = noise floor (~1–2%), meaning your change did NOT reach the
 render — do not proceed on hope.
+
+## Hiding ONE scatter tree (learned 2026-09-11, cost ~a day — read before trying)
+- **What the scatter really renders:** `terrain_main`'s `terrain` GN has ~50
+  `Is Viewport` → Switch nodes: viewport (and Python's evaluated depsgraph!)
+  see 56-poly `*_proxy` cylinders; RENDER swaps in hero collections
+  (`pine_trees`, `fir_trees_l/m`, `*_sapling_*` → objects pine_01..05,
+  silver_fir_01..06, pine_sapling_*, fir_sapling_*; materials pine_bark,
+  pine_twig, pine_trunk_01, pine_dead_branches, fir_bark, fir_twig,
+  fir_sapling_branches, ...). Editing `proxy_bark`/`leaves`/`proxy_leaves_*`
+  does NOTHING to the render. To enumerate render-time instances from Python:
+  unlink every `GeometryNodeIsViewport` output and set the Switch sockets
+  False in memory (scratchpad script `build_v009.py`, pass 1), then read
+  `depsgraph.object_instances` (~1.1M rows).
+- **Per-instance key:** Cycles `Object Info → Random` = `random_id / 0xFFFFFFFF`
+  (plain, NO hash; `inst.random_id & 0xFFFFFFFF`). A tree shows as an outer
+  instance `(id,)` plus one nested `(0,id)` — cull BOTH (2 values per tree).
+  Mask = Math COMPARE(Random, r, eps 4e-8) chain → MAXIMUM → Mix Shader
+  fac → Transparent BSDF, inserted before Material Output in every hero
+  material. Verified: saplings (`pine_sapling_medium_b`, `fir_sapling_medium_c`,
+  `fir_sapling_small_01`) vanish cleanly, neighbours untouched.
+- **Big hero pines (pine_0N) do NOT fully vanish this way:** crown twigs are
+  deeper-nested instances Python never sees, with their own Random; after
+  culling trunk+crown a swarm of dark specks stays in the sky, and those
+  bits are NOT reachable by any material (no emission under a
+  material-wide override, Position pass sees through them). Do not spend
+  time on it — leave the tree, or fix at scene level (GN density mask /
+  reseed) in the next scene version.
+- **Diagnostic gotchas:** (1) emission-encoded "measurement" renders are
+  CORRUPTED on alpha-cut leaf cards (transparent bounces sum layers; values
+  even >1) — only opaque trunk pixels are trustworthy; (2) the material
+  named `Material` is the FOG VOLUME (no Surface link) — never give it a
+  surface or the god-rays vanish; (3) `render-forest-360-video.py` SKIPS
+  existing frames — delete the outdir before a diagnostic re-render;
+  (4) Blender 5.x: `scene.compositing_node_group` (no `scene.node_tree`),
+  compositor output = `NodeGroupOutput`, File Output node uses
+  `directory`/`file_name`; (5) emissive-everything renders need
+  `material.cycles.emission_sampling='NONE'` or Cycles aborts on the
+  emissive-triangle limit.

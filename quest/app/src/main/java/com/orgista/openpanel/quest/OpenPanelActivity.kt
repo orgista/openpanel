@@ -228,6 +228,7 @@ class OpenPanelActivity : AppSystemActivity() {
     // horizon band GLB, and foreground GLBs are gone: the render bakes all of
     // it, which also removes the band/foreground seams and the posts that cut
     // through the panel. Two low-alpha shimmer planes animate the river.
+    ensureVideoDomeFromAssets()
     if (videoDomeAvailable()) {
       videoDomeEntity =
           Entity.createPanelEntity(
@@ -323,6 +324,40 @@ class OpenPanelActivity : AppSystemActivity() {
       java.io.File(getExternalFilesDir(null), VIDEO_DOME_FILE)
 
   private fun videoDomeAvailable(): Boolean = ENABLE_VIDEO_DOME && videoDomeFile().exists()
+
+  /**
+   * Materialises the bundled 360 dome clip from assets into
+   * getExternalFilesDir() on first launch (or after a version bump), so the
+   * finished render ships inside the APK instead of being sideloaded. Copies
+   * to a .tmp file and renames into place so a killed process never leaves a
+   * half-written file behind; the version marker lets a future asset swap
+   * force a re-copy. Runs synchronously on the render thread before the dome
+   * entity is created — acceptable for a first increment since the dome load
+   * itself is already synchronous here, but a background copy is the next
+   * step if this is visibly janky on device.
+   */
+  private fun ensureVideoDomeFromAssets() {
+    if (!ENABLE_VIDEO_DOME) return
+    val dir = getExternalFilesDir(null) ?: return
+    val target = videoDomeFile()
+    val versionFile = java.io.File(dir, VIDEO_DOME_VERSION_FILE)
+    val currentVersion = runCatching { versionFile.readText().trim() }.getOrDefault("")
+    if (target.exists() && currentVersion == VIDEO_DOME_VERSION) {
+      return
+    }
+    runCatching {
+          val tmp = java.io.File(dir, "$VIDEO_DOME_FILE.tmp")
+          assets.open(VIDEO_DOME_ASSET).use { input ->
+            tmp.outputStream().use { output -> input.copyTo(output) }
+          }
+          tmp.renameTo(target)
+          versionFile.writeText(VIDEO_DOME_VERSION)
+          Log.i(
+              TAG,
+              "video dome materialised from assets: ${target.absolutePath} (${target.length()} bytes)")
+        }
+        .onFailure { Log.w(TAG, "video dome asset copy failed, falling back to skydome", it) }
+  }
 
   /**
    * Replaces the SDK's equirect dome mesh (visible meridian seams that
@@ -921,5 +956,11 @@ class OpenPanelActivity : AppSystemActivity() {
     // Custom skybox mesh for the dome; flip off to return to the SDK equirect.
     private const val ENABLE_SEAMLESS_DOME = true
     private const val VIDEO_DOME_FILE = "forest360.mp4"
+    // Bundled asset the clip is materialised from on first launch (or when the
+    // version marker is stale) — keeps the version in the asset filename so a
+    // future render swap is a one-line bump here.
+    private const val VIDEO_DOME_ASSET = "forest360_v008.mp4"
+    private const val VIDEO_DOME_VERSION = "v008"
+    private const val VIDEO_DOME_VERSION_FILE = "forest360.version"
   }
 }
