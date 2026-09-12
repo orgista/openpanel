@@ -1,4 +1,5 @@
 apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
 
 def openPanelSigningValue = { String name ->
     def value = project.findProperty(name)
@@ -25,14 +26,32 @@ android {
         applicationId "com.orgista.openpanel"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 8
-        versionName "1.0.7"
+        versionCode 71
+        versionName "1.1.62"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders = [openPanelAppLabel: "OpenPanel"]
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+        coreLibraryDesugaringEnabled true
+    }
+    kotlinOptions {
+        jvmTarget = '21'
+        freeCompilerArgs += ['-Xannotation-default-target=param-property']
+    }
+    buildFeatures {
+        // Generate BuildConfig so native code can read VERSION_NAME/APPLICATION_ID
+        // instead of hardcoding them (AGP 8 disables this feature by default).
+        buildConfig true
+    }
+    packagingOptions {
+        resources.excludes += ['META-INF/LICENSE.md', 'META-INF/LICENSE-notice.md']
     }
     signingConfigs {
         release {
@@ -45,6 +64,13 @@ android {
         }
     }
     buildTypes {
+        debug {
+            // Install beside the ArborXR production package during USB testing.
+            // This preserves the production signature, data, and launcher state.
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+            manifestPlaceholders.openPanelAppLabel = "OpenPanel Debug"
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
@@ -62,11 +88,26 @@ repositories {
 }
 
 dependencies {
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.squareup.okio:okio:3.9.0'
     implementation project(':capacitor-android')
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+    implementation 'androidx.fragment:fragment-ktx:1.8.9'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.10.0'
+    implementation 'androidx.media3:media3-common-ktx:1.10.0'
+    implementation 'androidx.media3:media3-session:1.10.0'
+    implementation 'androidx.media3:media3-exoplayer:1.10.0'
+    implementation 'org.readium.kotlin-toolkit:readium-shared:3.3.0'
+    implementation 'org.readium.kotlin-toolkit:readium-streamer:3.3.0'
+    implementation 'org.readium.kotlin-toolkit:readium-navigator:3.3.0'
+    implementation 'org.readium.kotlin-toolkit:readium-navigator-media-audio:3.3.0'
+    implementation 'org.readium.kotlin-toolkit:readium-adapter-exoplayer:3.3.0'
+    implementation 'org.readium.kotlin-toolkit:readium-adapter-pdfium:3.3.0'
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
@@ -103,7 +144,7 @@ tasks.register("verifyOpenPanelReleaseSigning") {
 }
 
 tasks.matching { task ->
-    task.name in ["preReleaseBuild", "assembleRelease", "bundleRelease", "packageRelease"]
+    task.name in ["assembleRelease", "bundleRelease", "packageRelease", "signReleaseBundle"]
 }.configureEach {
     dependsOn tasks.named("verifyOpenPanelReleaseSigning")
 }

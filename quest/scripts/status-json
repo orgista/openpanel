@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+quest_root="$(cd "$script_dir/.." && pwd)"
+
+python3 - "$quest_root" <<'PY'
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+quest_root = Path(sys.argv[1]).resolve()
+repo_root = quest_root.parent
+build_gradle = quest_root / "app" / "build.gradle.kts"
+activity = quest_root / "app" / "src" / "main" / "java" / "com" / "orgista" / "openpanel" / "quest" / "OpenPanelActivity.kt"
+layout = quest_root / "app" / "src" / "main" / "java" / "com" / "orgista" / "openpanel" / "quest" / "PanelLayout.kt"
+active_asset_paths = [
+    quest_root / "app" / "src" / "main" / "res" / "drawable-nodpi" / "skydome_pine_forest_fallback_v1.jpg",
+    quest_root / "app" / "src" / "main" / "assets" / "horizon_band_pine_forest_v1.glb",
+    quest_root / "app" / "src" / "main" / "assets" / "pine_forest_foreground_v1.glb",
+    quest_root / "app" / "src" / "main" / "res" / "drawable-nodpi" / "water_surface_pine_forest_v1.jpg",
+    quest_root / "app" / "src" / "main" / "res" / "raw" / "forest_river_birdsong_background_v1.m4a",
+]
+pine_reference_image = Path("/Users/macstudio/Downloads/43600e6a5e2d1b2de05000eb4bf89968e4613bc4.jpeg")
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+
+gradle = read(build_gradle)
+activity_source = read(activity)
+layout_source = read(layout)
+
+def match(pattern: str, source: str, default=None):
+    found = re.search(pattern, source)
+    return found.group(1) if found else default
+
+application_id = match(r'applicationId\s*=\s*"([^"]+)"', gradle, "com.orgista.openpanel.quest")
+version_name = match(r'versionName\s*=\s*"([^"]+)"', gradle)
+version_code = match(r'versionCode\s*=\s*(\d+)', gradle)
+
+tmp_root = Path(os.environ.get("TMPDIR") or "/tmp")
+build_root = Path(os.environ.get("OPENPANEL_GRADLE_BUILD_ROOT") or tmp_root / "openpanel-quest-build")
+project_cache = Path(os.environ.get("OPENPANEL_GRADLE_PROJECT_CACHE") or tmp_root / "openpanel-quest-gradle-cache")
+apk_candidates = [
+    build_root / "app" / "outputs" / "apk" / "debug" / "app-debug.apk",
+    quest_root / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk",
+]
+
+def run(args, timeout=5):
+    try:
+        return subprocess.run(args, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+adb = os.environ.get("ADB") or shutil.which("adb")
+devices = []
+installed = []
+if adb:
+    result = run([adb, "devices", "-l"])
+    if result and result.returncode == 0:
+        for line in result.stdout.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 2 or parts[1] != "device":
+                continue
+            serial = parts[0]
+            model = ""
+            for part in parts[2:]:
+                if part.startswith("model:"):
+                    model = part.split(":", 1)[1]
+                    break
+            devices.append({"serial": serial, "model": model})
+            pkg = run([adb, "-s", serial, "shell", "dumpsys", "package", application_id], timeout=8)
+            if pkg and f"Package [{application_id}]" in pkg.stdout:
+                text = pkg.stdout.replace("\r", "")
+                installed.append(
+                    {
+                        "serial": serial,
+                        "versionName": match(r"versionName=([^\s]+)", text),
+                        "versionCode": match(r"versionCode=(\d+)", text),
+                        "lastUpdateTime": match(r"lastUpdateTime=([^\n]+)", text),
+                        "installerPackageName": match(r"installerPackageName=([^\n]+)", text),
+                    }
+                )
+
+tracked = run(["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "quest"], timeout=5)
+
+data = {
+    "project": "OpenPanel VR",
+    "repoRoot": str(repo_root),
+    "questRoot": str(quest_root),
+    "questTreeTrackedByRootGit": bool(tracked and tracked.returncode == 0),
+    "applicationId": application_id,
+    "versionName": version_name,
+    "versionCode": int(version_code) if version_code else None,
+    "panelLayout": {
+        "dpPerMeter": float(match(r"DP_PER_METER\s*=\s*([0-9.]+)f", layout_source, "0")),
+        "libraryWidthMeters": float(match(r"LIBRARY_WIDTH_METERS\s*=\s*([0-9.]+)f", layout_source, "0")),
+        "mainResolutionScale": float(match(r"MAIN_RESOLUTION_SCALE\s*=\s*([0-9.]+)f", layout_source, "0")),
+    },
+    "environment": {
+        "skyboxDrawable": match(r"baseTextureAndroidResourceId\s*=\s*R\.drawable\.([A-Za-z0-9_]+)", activity_source),
+        "horizonMesh": match(r'Mesh\("([^"]*horizon[^"]*)"', activity_source),
+        "foregroundMesh": match(r'Mesh\("([^"]*foreground[^"]*)"', activity_source),
+        "foregroundGeometryEnabled": match(r"ENABLE_FOREGROUND_GEOMETRY\s*=\s*(true|false)", activity_source),
+        "ambienceRaw": match(r"MediaPlayer\.create\(this,\s*R\.raw\.([A-Za-z0-9_]+)\)", activity_source),
+        "waterBaseEnabled": match(r"ENABLE_WATER_BASE_LAYER\s*=\s*(true|false)", activity_source),
+        "activeAssets": [
+            {"path": str(path), "exists": path.exists(), "bytes": path.stat().st_size if path.exists() else None}
+            for path in active_asset_paths
+        ],
+        "referenceImage": {
+            "path": str(pine_reference_image),
+            "exists": pine_reference_image.exists(),
+            "bytes": pine_reference_image.stat().st_size if pine_reference_image.exists() else None,
+        },
+        "alignmentNote": "horizon_band_pine_forest_v1.glb is derived from the exact angular crop of skydome_pine_forest_fallback_v1.jpg",
+    },
+    "gradle": {
+        "verifyScript": str(quest_root / "scripts" / "verify"),
+        "buildRoot": str(build_root),
+        "projectCache": str(project_cache),
+        "defaultTasks": ["app:testDebugUnitTest", "app:assembleDebug"],
+        "fullVerifyTasks": ["app:testDebugUnitTest", "app:lintDebug", "app:assembleDebug"],
+    },
+    "apk": [
+        {"path": str(path), "exists": path.exists(), "bytes": path.stat().st_size if path.exists() else None}
+        for path in apk_candidates
+    ],
+    "adb": {
+        "path": adb,
+        "devices": devices,
+        "installedOpenPanelQuest": installed,
+    },
+    "contextFiles": [
+        str(quest_root / "AGENTS.md"),
+        str(quest_root / "README.md"),
+        str(quest_root / "docs" / "horizon-implementation-map.md"),
+        str(quest_root / "scripts" / "README-environment.md"),
+    ],
+}
+
+print(json.dumps(data, indent=2, sort_keys=True))
+PY

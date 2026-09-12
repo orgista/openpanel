@@ -28,5 +28,8 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
-  assetsInclude: ['**/*.svg', '**/*.csv'],
+  assetsInclude: ['**/*.svg', '**/*.csv', '**/*.mp4'],
+  test: {
+    include: ['src/**/*.test.{ts,tsx}'],
+  },
 })

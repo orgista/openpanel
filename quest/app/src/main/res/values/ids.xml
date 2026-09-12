@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Compositor panel entities -->
+  <item type="id" name="library_panel" />
+  <item type="id" name="system_bar_panel" />
+  <item type="id" name="video_dome_panel" />
+</resources>

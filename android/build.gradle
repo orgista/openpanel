@@ -3,11 +3,12 @@
 buildscript {
     
     repositories {
-        google()
         mavenCentral()
+        google()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.13.0'
+        classpath 'com.android.tools.build:gradle:8.13.2'
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.20'
         classpath 'com.google.gms:google-services:4.4.4'
 
         // NOTE: Do not place your application dependencies here; they belong
@@ -17,10 +18,23 @@ buildscript {
 
 apply from: "variables.gradle"
 
+def openPanelLocalBuildRoot = System.getenv('OPENPANEL_GRADLE_BUILD_ROOT')
+if (openPanelLocalBuildRoot) {
+    allprojects { targetProject ->
+        targetProject.layout.buildDirectory.set(file("${openPanelLocalBuildRoot}/${targetProject.name}"))
+    }
+}
+
 allprojects {
     repositories {
-        google()
         mavenCentral()
+        google()
+        maven {
+            url 'https://jitpack.io'
+            content {
+                includeGroup 'com.github.marain87'
+            }
+        }
     }
 }
 

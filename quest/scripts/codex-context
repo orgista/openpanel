@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+quest_root="$(cd "$script_dir/.." && pwd)"
+repo_root="$(cd "$quest_root/.." && pwd)"
+build_gradle="$quest_root/app/build.gradle.kts"
+
+version_name="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' "$build_gradle" | head -1)"
+version_code="$(sed -n 's/.*versionCode *= *\([0-9][0-9]*\).*/\1/p' "$build_gradle" | head -1)"
+application_id="$(sed -n 's/.*applicationId *= *"\([^"]*\)".*/\1/p' "$build_gradle" | head -1)"
+
+cat <<EOF
+# OpenPanel VR Codex Context
+
+Repo: $repo_root
+Quest project: $quest_root
+Package: ${application_id:-com.orgista.openpanel.quest}
+Version: ${version_name:-unknown} / ${version_code:-unknown}
+
+## Read First
+
+- quest/AGENTS.md
+- quest/README.md
+- quest/docs/horizon-implementation-map.md
+- quest/scripts/README-environment.md
+- quest/audits/pine-forest-generated/README.md, when working on the pine skybox
+- audits/2026-08-23-openpanel-gui-review/README.md, when working on panel visual fidelity
+
+## Deterministic Commands
+
+- Context summary: quest/scripts/codex-context
+- Machine-readable status: quest/scripts/status-json
+- Cheap Quest verify: quest/scripts/verify app:testDebugUnitTest
+- Full Quest verify: quest/scripts/verify app:testDebugUnitTest app:lintDebug app:assembleDebug
+- Launch/capture headset UI: quest/scripts/capture-ui --launch
+
+## Quest Build Notes
+
+- Use quest/scripts/verify instead of raw ./gradlew on the SMB workspace.
+- The helper sets OPENPANEL_GRADLE_BUILD_ROOT to \${TMPDIR:-/tmp}/openpanel-quest-build by default.
+- It also passes --project-cache-dir \${TMPDIR:-/tmp}/openpanel-quest-gradle-cache and --no-watch-fs.
+- Debug APK default path: \${TMPDIR:-/tmp}/openpanel-quest-build/app/outputs/apk/debug/app-debug.apk
+
+## ADB Notes
+
+- Default Quest serial fallback: 340YC10G8D180B
+- Standard screencap can be black in immersive apps.
+- Use MetaCam capture: quest/scripts/capture-ui --launch
+- Captures are stored under repo audits/quest-capture-<timestamp>/ by default.
+
+## Visual Fidelity Notes
+
+- OpenPanel panel texture clarity is controlled through DpPerMeterDisplayOptions in OpenPanelActivity.kt and constants in PanelLayout.kt.
+- Meta SDK resize handles are opt-in through IsdkPanelResize; the old visible lower-right dots were app-drawn Compose chrome.
+- For panel dots/noise, compare against quest/audits/meta-ui-ppi/current-comparison/zoom-crops-4x.jpg and the latest MetaCam capture.
+
+## Pine Skybox Notes
+
+- Active pine environment is documented in quest/scripts/README-environment.md.
+- The corrected 0.3.39 horizon band is derived from the exact angular crop of the reference-driven 8K fallback dome; do not independently render the forward band unless you also solve overlay alignment.
+- The generated pine foreground GLB is disabled in 0.3.39 because a Quest 3S capture showed flat slab/post artifacts; re-author and capture before enabling it again.
+- Regenerate with: quest/scripts/generate-pine-forest-environment.py --source-dir /Users/macstudio/Downloads/pine_forest --reference-image /Users/macstudio/Downloads/43600e6a5e2d1b2de05000eb4bf89968e4613bc4.jpeg
+EOF

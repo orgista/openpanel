@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.018"/>
+      <stop offset="0.5" stop-color="#f5fbff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#eef8ff" stop-opacity="0.11"/>
+    </linearGradient>
+    <filter id="soft" x="-16%" y="-16%" width="132%" height="132%">
+      <feGaussianBlur stdDeviation="2.05"/>
+    </filter>
+  </defs>
+  <g fill="none" stroke="url(#fade)" stroke-linecap="round" filter="url(#soft)">
+    <path stroke-width="4.4" d="M48 152 C132 126 218 132 306 156"/>
+    <path stroke-width="4.0" d="M300 126 C382 108 468 114 552 138"/>
+    <path stroke-width="4.2" d="M628 166 C712 142 798 148 892 176"/>
+
+    <path stroke-width="4.8" d="M18 292 C118 258 208 268 306 294"/>
+    <path stroke-width="4.0" d="M214 334 C296 306 378 312 462 334"/>
+    <path stroke-width="4.4" d="M488 294 C578 264 662 272 748 300"/>
+    <path stroke-width="3.9" d="M720 344 C800 320 878 324 1000 350"/>
+
+    <path stroke-width="5.6" d="M8 466 C114 428 204 438 302 470"/>
+    <path stroke-width="4.8" d="M258 422 C352 388 438 398 532 428"/>
+    <path stroke-width="5.0" d="M520 456 C612 420 698 428 792 458"/>
+    <path stroke-width="4.6" d="M760 402 C844 374 918 382 1012 408"/>
+
+    <path stroke-width="5.8" d="M30 618 C132 582 220 592 320 624"/>
+    <path stroke-width="5.0" d="M286 676 C374 642 462 650 554 682"/>
+    <path stroke-width="5.2" d="M546 616 C642 580 730 588 830 620"/>
+    <path stroke-width="4.6" d="M788 664 C874 632 952 640 1022 668"/>
+
+    <path stroke-width="6.0" d="M58 820 C162 784 256 792 362 824"/>
+    <path stroke-width="5.4" d="M312 772 C408 736 500 744 600 776"/>
+    <path stroke-width="5.2" d="M598 816 C696 780 788 788 888 820"/>
+    <path stroke-width="4.8" d="M824 766 C904 738 968 744 1024 768"/>
+  </g>
+  <g fill="none" stroke="#ffffff" stroke-opacity="0.028" stroke-linecap="round" filter="url(#soft)">
+    <path stroke-width="2.4" d="M118 220 C180 202 232 208 298 228"/>
+    <path stroke-width="2.2" d="M414 208 C482 188 544 194 618 214"/>
+    <path stroke-width="2.2" d="M768 232 C838 212 892 218 958 238"/>
+
+    <path stroke-width="2.7" d="M150 520 C216 496 262 504 334 522"/>
+    <path stroke-width="2.6" d="M470 500 C542 476 596 482 666 504"/>
+    <path stroke-width="2.6" d="M792 526 C854 504 904 508 974 530"/>
+
+    <path stroke-width="2.8" d="M164 724 C236 698 292 706 366 730"/>
+    <path stroke-width="2.8" d="M498 708 C566 682 622 690 696 714"/>
+    <path stroke-width="2.6" d="M810 734 C870 712 920 718 990 742"/>
+  </g>
+  <g fill="none" stroke="#ffffff" stroke-opacity="0.016" stroke-linecap="round" filter="url(#soft)">
+    <path stroke-width="1.8" d="M84 236 C154 220 198 224 260 240"/>
+    <path stroke-width="1.8" d="M316 236 C382 220 430 224 498 240"/>
+    <path stroke-width="1.8" d="M560 226 C630 208 684 214 752 232"/>
+    <path stroke-width="1.8" d="M816 238 C882 222 928 226 996 242"/>
+
+    <path stroke-width="1.9" d="M90 546 C156 528 208 532 276 548"/>
+    <path stroke-width="1.9" d="M370 536 C438 518 492 522 560 538"/>
+    <path stroke-width="1.9" d="M652 544 C720 526 772 530 840 548"/>
+    <path stroke-width="1.9" d="M886 552 C942 538 980 540 1022 554"/>
+
+    <path stroke-width="1.9" d="M110 748 C178 732 228 736 294 752"/>
+    <path stroke-width="1.9" d="M438 742 C506 726 556 730 624 746"/>
+    <path stroke-width="1.9" d="M744 750 C812 734 862 738 930 754"/>
+  </g>
+</svg>

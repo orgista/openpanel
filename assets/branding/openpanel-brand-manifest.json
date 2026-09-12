@@ -1,0 +1,26 @@
+{
+  "brand": "OpenPanel",
+  "identity": "Quad — one tile open",
+  "sourceArchive": {
+    "filename": "OpenPanel.zip",
+    "sha256": "8874dc2e1e31bb7cd947ccb395f82b01b199c9f1741ba0d27d41e4c313fcd1c7",
+    "definition": "openpanel-brand.js"
+  },
+  "startupAnimation": {
+    "filename": "OpenPanel Launch.mp4",
+    "sha256": "2214d03a3f8f10cdbd828a263f6ff2d6cba670e3a5583c5f9c8c02453883d8a7",
+    "durationSeconds": 5,
+    "width": 1920,
+    "height": 1080,
+    "frameRate": 30,
+    "videoCodec": "h264",
+    "pixelFormat": "yuv420p"
+  },
+  "colors": {
+    "tile": "#2b3542",
+    "accentStart": "#7dd3fc",
+    "accentEnd": "#3b82f6",
+    "surface": "#fafafa",
+    "launchBackground": "#050607"
+  }
+}

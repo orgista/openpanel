@@ -1,0 +1,74 @@
+OPENPANEL POST-DEPLOYMENT CONTENT CHECKLIST
+============================================
+
+IMPORTANT
+---------
+This is a human operations checklist. OpenPanel must not parse, import, bundle,
+seed, or automatically apply this file. The application ships with an empty
+user-content catalog. Add approved content only after deployment through the
+OpenPanel admin interface or an explicitly authorized device-management flow.
+
+Do not put passwords, API keys, tokens, private URLs, or other secrets here.
+
+
+PENDING YOUTUBE CHANNELS
+------------------------
+
+[ ] Homeschool Pop
+    Type: YouTube channel
+    URL: https://www.youtube.com/channel/UCfPyVJEBD7Di1YYjTdS2v8g
+    Add through: OpenPanel Admin Panel -> YouTube
+    Target devices/groups: Confirm at deployment
+    Ordering/metadata: Resolve current title and artwork from YouTube when added
+    Status: Pending post-deployment configuration
+
+[ ] Kurzgesagt - In a Nutshell
+    Type: YouTube channel
+    URL: https://www.youtube.com/channel/UCsXVk37bltHxD1rDPwtNM8Q
+    Add through: OpenPanel Admin Panel -> YouTube
+    Target devices/groups: Confirm at deployment
+    Ordering/metadata: Resolve current title and artwork from YouTube when added
+    Status: Pending post-deployment configuration
+
+Note: Do not seed or maintain a bundled list of channel videos. OpenPanel must
+retrieve the current channel catalog after the administrator adds the channel.
+
+
+PENDING APPS AND GAMES
+----------------------
+
+[ ] Select approved installed applications during OpenPanel setup or from the
+    Admin Panel after deployment.
+    Package names: Record the real installed package names at deployment time
+    Target devices/groups: Confirm at deployment
+    Status: No applications are preselected or bundled as catalog content
+
+
+PENDING BOOKS AND AUDIO
+-----------------------
+
+[ ] Project Gutenberg, only if requested for the deployment
+    Type: Public OPDS catalog
+    URL: Confirm the current official HTTPS OPDS endpoint before adding
+    Add through: OpenPanel Admin Panel -> Books & Audio
+    Target devices/groups: Confirm at deployment
+    Status: Optional; not bundled or preconfigured
+
+[ ] Institution catalog(s), if supplied by the deploying organization
+    Type: OPDS 1.2 or OPDS 2.0 catalog
+    URL: Obtain the approved HTTPS endpoint during deployment
+    Authentication/DRM: Use only an authorized institutional connector
+    Target devices/groups: Confirm at deployment
+    Status: Pending deployment-specific information
+
+
+DEPLOYMENT RECORD
+-----------------
+
+Deployment date:
+Operator:
+OpenPanel version:
+Target devices/groups:
+Items added:
+Items intentionally skipped:
+Verification notes:

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- Capacitor generates config.xml during sync even when no Cordova plugin
+         consumes it directly. Keep it available for future plugin installs. -->
+    <issue id="UnusedResources">
+        <ignore path="src/main/res/xml/config.xml" />
+    </issue>
+
+    <!-- Capacitor's splash generator supplies screen-resolution variants rather
+         than density-equivalent icons; Android scales these launch assets. -->
+    <issue id="IconDipSize">
+        <ignore regexp="splash\.png" />
+    </issue>
+    <issue id="IconDuplicatesConfig">
+        <ignore regexp="splash\.png" />
+    </issue>
+    <issue id="IconLocation">
+        <ignore regexp="splash\.png" />
+    </issue>
+</lint>

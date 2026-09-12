@@ -1,6 +1,7 @@
 # --- Signing material: NEVER commit keystores or signing secrets ---
 # Release signing material must live in a secret manager / offline signer, not
 # in source control. Debug keystores are throwaway but are also ignored here.
+/private/
 *.keystore
 *.jks
 *.p12
@@ -14,6 +15,7 @@ signing.properties
 # --- Build outputs / artifacts ---
 dist/
 build/
+/artifacts/
 *.apk
 *.aab
 
@@ -23,8 +25,11 @@ Samples/
 *.zip
 
 # --- Dependencies / toolchains ---
-node_modules/
+/node_modules
+.node_modules.interrupted-openpanel-library/
+.npm-cache/
 .gradle-home/
+.gradle-project-cache/
 .toolchains/
 
 # --- Private UI (open-core: the React app lives in a separate PRIVATE repo;
@@ -40,6 +45,7 @@ local.properties
 docs/_archive/
 
 # --- Screenshots & Figma scaffolding (UI/reference assets, not engine code) ---
+/design/
 /*.png
 /*.jpg
 /*.jpeg

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<resources>
+  <style name="Theme.OpenPanelBoot" parent="android:style/Theme.Material.NoActionBar">
+    <item name="android:windowSplashScreenBackground">@color/openpanel_boot_background</item>
+    <item name="android:windowSplashScreenAnimatedIcon">@drawable/openpanel_quad_mark</item>
+    <item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+    <item name="android:windowSplashScreenAnimationDuration">350</item>
+    <item name="android:windowBackground">@color/openpanel_boot_background</item>
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:fontFamily">sans</item>
+  </style>
+  <style name="Theme.Transparent" parent="android:Theme">
+    <item name="android:windowIsTranslucent">true</item>
+    <item name="android:windowBackground">@android:color/transparent</item>
+    <item name="android:windowContentOverlay">@null</item>
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:backgroundDimEnabled">false</item>
+  </style>
+  <style name="PanelAppThemeTransparent" parent="android:Theme">
+    <item name="android:windowIsTranslucent">true</item>
+    <item name="android:windowBackground">@android:color/transparent</item>
+    <item name="android:windowContentOverlay">@null</item>
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:backgroundDimEnabled">false</item>
+  </style>
+</resources>
